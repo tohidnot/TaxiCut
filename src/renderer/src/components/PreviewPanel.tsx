@@ -88,11 +88,13 @@ function findTimelineClips(project: Project, head: number): ActiveTimelineClips 
   return { visualClip, visualMedia, audioClip, audioMedia, textClip };
 }
 
-/** One composited timeline layer (upper video tracks, extra audio tracks). */
+/** One composited timeline layer (upper/lower video tracks, extra audio tracks). */
 interface StackLayer {
   track: Track;
   clip: Clip;
   media?: MediaAsset;
+  /** Active right now (true) or preloading just ahead of the playhead (false). */
+  live: boolean;
 }
 
 function clipActiveAt(c: Clip, head: number): boolean {
@@ -100,42 +102,90 @@ function clipActiveAt(c: Clip, head: number): boolean {
 }
 
 /**
- * All active layers besides the main interactive clip, bottom-to-top:
- * - `below`: active non-text clips on video tracks under the main clip's track
- * - `above`: active non-text clips on video tracks over it
- * - `audio`: active clips on unmuted audio tracks (the caller drives the
- *   first one through the main audio element and these as extras)
- * Mirrors the export compositor (V1 base, upper layers over it, all audio mixed).
+ * All layers besides the base picture clip:
+ * - `below`/`above`: active non-text clips on other unmuted video tracks,
+ *   plus the next upcoming video clip per track (preloaded, live=false) so
+ *   its decoder is warm before the boundary — no pop-in stalls.
+ * - `audio`: active clips on unmuted audio tracks, plus upcoming ones.
+ * Partitioned relative to the hero (base) track. Mirrors the export
+ * compositor (V1 base, upper layers over it, all audio mixed).
  */
 function findTimelineLayers(
   project: Project,
   head: number,
-  mainClipId?: string,
+  heroTrackId?: string,
+  heroClipId?: string,
+  preloadSec = 3,
 ): { below: StackLayer[]; above: StackLayer[]; audio: StackLayer[] } {
   const tracks = project.tracks ?? [];
   const below: StackLayer[] = [];
   const above: StackLayer[] = [];
   const audio: StackLayer[] = [];
-  let mainIdx = tracks.length;
-  if (mainClipId) {
-    const i = tracks.findIndex((t) => t.clips.some((c) => c.id === mainClipId));
-    if (i >= 0) mainIdx = i;
+  let heroIdx = tracks.length;
+  if (heroTrackId) {
+    const i = tracks.findIndex((t) => t.id === heroTrackId);
+    if (i >= 0) heroIdx = i;
   }
   tracks.forEach((t, i) => {
     if (t.muted) return;
     if (t.kind === 'video') {
-      const clip = t.clips.find((c) => c.kind !== 'text' && c.id !== mainClipId && clipActiveAt(c, head));
-      if (!clip) return;
-      const layer = { track: t, clip, media: project.media.find((m) => m.id === clip.mediaId) };
-      if (i < mainIdx) below.push(layer);
-      else above.push(layer);
+      if (t.id === heroTrackId) return;
+      const liveClip = t.clips.find((c) => c.kind !== 'text' && c.id !== heroClipId && clipActiveAt(c, head));
+      const push = (clip: Clip | undefined, live: boolean) => {
+        if (!clip) return;
+        // Images mount instantly — only videos benefit from preloading.
+        if (!live && project.media.find((m) => m.id === clip.mediaId)?.kind !== 'video') return;
+        const layer = { track: t, clip, media: project.media.find((m) => m.id === clip.mediaId), live };
+        if (i < heroIdx) below.push(layer);
+        else above.push(layer);
+      };
+      push(liveClip, true);
+      if (!liveClip) {
+        const next = t.clips
+          .filter((c) => c.kind !== 'text' && c.startSec >= head && c.startSec - head < preloadSec)
+          .sort((a, b) => a.startSec - b.startSec)[0];
+        push(next, false);
+      }
     } else {
-      const clip = t.clips.find((c) => clipActiveAt(c, head));
-      if (!clip) return;
-      audio.push({ track: t, clip, media: project.media.find((m) => m.id === clip.mediaId) });
+      const liveClip = t.clips.find((c) => clipActiveAt(c, head));
+      if (liveClip) {
+        audio.push({ track: t, clip: liveClip, media: project.media.find((m) => m.id === liveClip.mediaId), live: true });
+      } else {
+        const next = t.clips
+          .filter((c) => c.startSec >= head && c.startSec - head < preloadSec)
+          .sort((a, b) => a.startSec - b.startSec)[0];
+        if (next) {
+          audio.push({ track: t, clip: next, media: project.media.find((m) => m.id === next.mediaId), live: false });
+        }
+      }
     }
   });
   return { below, above, audio };
+}
+
+interface BaseClip {
+  track?: Track;
+  clip?: Clip;
+  media?: MediaAsset;
+}
+
+/**
+ * Base picture layer: the first unmuted video track (array order) holding any
+ * clip, and its active non-text clip at the playhead (undefined in gaps).
+ * Same definition as the export compositor's base track, so preview and
+ * export can never disagree about what is "underneath". The hero element
+ * never switches tracks because of overlays, so the base plays straight
+ * through layer boundaries with zero re-buffering.
+ */
+function findBaseClip(project: Project, head: number): BaseClip {
+  const tracks = project.tracks ?? [];
+  const baseTrack = tracks.find((t) => t.kind === 'video' && !t.muted && t.clips.length > 0);
+  if (!baseTrack) return {};
+  const clip = baseTrack.clips.find(
+    (c) => c.kind !== 'text' && head >= c.startSec && head < c.startSec + c.durationSec,
+  );
+  if (!clip) return { track: baseTrack };
+  return { track: baseTrack, clip, media: project.media.find((m) => m.id === clip.mediaId) };
 }
 
 /** Point the element at this media if it isn't already. Keeps the decoder warm across gaps. */
@@ -275,14 +325,38 @@ export default function PreviewPanel() {
     ? project?.media.find((m) => m.id === selectedMediaId)
     : undefined;
 
-  const { visualClip, visualMedia, audioClip: activeAudioClip, audioMedia: activeAudioMedia, textClip } =
+  const { visualClip: topClip, audioClip: activeAudioClip, audioMedia: activeAudioMedia, textClip } =
     project ? findTimelineClips(project, playhead) : {};
 
+  // Hero = base picture clip (first content-bearing video track). Overlays
+  // never move it, so the base plays through boundaries without re-buffering.
+  const { track: heroTrack, clip: heroClip, media: heroMedia } =
+    project ? findBaseClip(project, playhead) : {};
+
+  // Interaction target: the selected clip when it is an active visual clip,
+  // else the topmost active clip, else the hero. Drag/handles/crop/grade UI
+  // all follow this; the hero element always shows the base picture.
+  const selectedClipObj = project && selectedClipId ? findClipInProject(project, selectedClipId) : undefined;
+  const selectedTrack = selectedClipObj
+    ? (project?.tracks ?? []).find((t) => t.clips.some((c) => c.id === selectedClipObj.id))
+    : undefined;
+  const selectedIsVisual = !!selectedClipObj && !!selectedTrack &&
+    selectedTrack.kind === 'video' && selectedClipObj.kind !== 'text' &&
+    playhead >= selectedClipObj.startSec &&
+    playhead < selectedClipObj.startSec + selectedClipObj.durationSec;
+  const uiClip = (selectedIsVisual ? selectedClipObj : undefined) ?? topClip ?? heroClip;
+  const uiMedia = uiClip ? project?.media.find((m) => m.id === uiClip.mediaId) : undefined;
+  // Back-compat aliases for the geometry/interaction code below.
+  const visualClip = uiClip;
+  const visualMedia = uiMedia;
+
   // Extra composited layers (upper/lower video layers + 2nd+ audio tracks),
-  // bottom-to-top within each group. The main interactive clip is excluded.
+  // bottom-to-top within each group. The hero clip is excluded.
   const extraLayers = project
-    ? findTimelineLayers(project, playhead, visualClip?.id)
+    ? findTimelineLayers(project, playhead, heroTrack?.id, heroClip?.id)
     : { below: [], above: [], audio: [] };
+  const overlayVisualActive =
+    extraLayers.below.some((l) => l.live) || extraLayers.above.some((l) => l.live);
   // Per-element refs for the best-effort layer sync (keyed by track/clip id).
   const layerVideoRefs = useRef(new Map<string, HTMLVideoElement>());
   const layerAudioRefs = useRef(new Map<string, HTMLAudioElement>());
@@ -308,7 +382,7 @@ export default function PreviewPanel() {
     );
   const subtitleText = activeSubtitleClip?.text;
 
-  const currentFps = visualMedia?.fps || 30;
+  const currentFps = heroMedia?.fps || visualMedia?.fps || 30;
 
   // Measure the stage so the canvas box can letterbox to the aspect ratio.
   useEffect(() => {
@@ -331,11 +405,11 @@ export default function PreviewPanel() {
   const boxW = fitScale > 0 ? Math.max(1, Math.floor(canvasW * fitScale)) : 0;
   const boxH = fitScale > 0 ? Math.max(1, Math.floor(canvasH * fitScale)) : 0;
 
-  // Visual layer geometry: contain-fit base rect of the CROPPED region + user transform.
-  const showVisualLayer =
+  // Hero layer: shows the base picture clip (never an overlay).
+  const showHeroLayer =
     previewMode === 'timeline' &&
-    !!visualClip &&
-    (visualMedia?.kind === 'video' || visualMedia?.kind === 'image');
+    !!heroClip &&
+    (heroMedia?.kind === 'video' || heroMedia?.kind === 'image');
   const mw = visualMedia?.width || 0;
   const mh = visualMedia?.height || 0;
   const clipC = visualClip
@@ -376,7 +450,7 @@ export default function PreviewPanel() {
     transformOrigin: 'center',
     cursor: cropMode ? 'default' : 'move',
     touchAction: 'none',
-    display: showVisualLayer ? 'block' : 'none',
+    display: showHeroLayer ? 'block' : 'none',
   };
   // Inner media fills the outer box so the cropped region shows through:
   // inner is full-source sized, offset by the crop insets.
@@ -449,16 +523,18 @@ export default function PreviewPanel() {
   };
 
   // Best-effort sync for extra layers: overlay videos follow the playhead and
-  // 2nd+ audio tracks mix in. Loose threshold, no stall logic — the main
-  // picture/audio path above is untouched and always wins.
+  // 2nd+ audio tracks mix in. Upcoming layers preload (src + seek, held
+  // paused) so boundaries never pop. Loose threshold, no stall logic — the
+  // hero picture/audio path is untouched and always wins.
   const syncExtraLayers = (
     head: number,
     proj: Project,
     paused: boolean,
-    mainVisualId?: string,
+    heroTrackId?: string,
+    heroClipId?: string,
     mainAudioId?: string,
   ) => {
-    const { below, above, audio } = findTimelineLayers(proj, head, mainVisualId);
+    const { below, above, audio } = findTimelineLayers(proj, head, heroTrackId, heroClipId);
     const thresh = paused ? 0.04 : 0.4;
     for (const l of [...below, ...above]) {
       if (l.media?.kind !== 'video') continue;
@@ -470,6 +546,12 @@ export default function PreviewPanel() {
         el.load();
       }
       applyProps(el, l.clip);
+      if (!l.live) {
+        // Preloading: park on the in-point, stay paused until active.
+        syncClock(el, l.clip.inSec, thresh);
+        if (!el.paused) el.pause();
+        continue;
+      }
       const target = l.clip.inSec + (head - l.clip.startSec) * l.clip.speed;
       syncClock(el, target, thresh);
       if (paused) {
@@ -494,6 +576,11 @@ export default function PreviewPanel() {
         el.load();
       }
       applyProps(el, layer.clip);
+      if (!layer.live) {
+        syncClock(el, layer.clip.inSec, thresh);
+        if (!el.paused) el.pause();
+        continue;
+      }
       syncClock(el, layer.clip.inSec + (head - layer.clip.startSec) * layer.clip.speed, thresh);
       if (!paused) playQuiet(el);
     }
@@ -515,13 +602,21 @@ export default function PreviewPanel() {
     }
   };
 
-  // Non-interactive composited layer (upper/lower video tracks). Images are
-  // exact; videos follow the playhead via the best-effort sync above.
+  // Composited overlay layer. Live layers draw normally; upcoming (preloading)
+  // layers stay hidden but mounted so the decoder is warm at the boundary.
+  // The overlay backing the uiClip is interactive (drag/resize like the base).
   const renderStackLayer = (l: StackLayer) => {
     if (l.media?.kind !== 'video' && l.media?.kind !== 'image') return null;
+    if (!l.live && l.media.kind !== 'video') return null;
     const g = geomFor(l.clip, l.media);
+    const interactive = l.live && l.clip.id === uiClip?.id && l.clip.id !== heroClip?.id;
+    const layer: React.CSSProperties = {
+      ...g.layer,
+      ...(l.live ? {} : { visibility: 'hidden' as const }),
+      ...(interactive ? { pointerEvents: 'auto' as const, cursor: 'move' } : {}),
+    };
     return (
-      <div className="canvas-layer" key={l.clip.id} style={g.layer}>
+      <div className="canvas-layer" key={l.clip.id} style={layer} {...(interactive ? layerPointerHandlers : {})}>
         <div className="canvas-inner" style={g.inner}>
           {l.media.kind === 'image' ? (
             <img src={window.taxicut.mediaUrl(l.media.path)} alt="" draggable={false} />
@@ -774,7 +869,7 @@ export default function PreviewPanel() {
   };
 
   const renderCropOverlay = () => {
-    if (!cropMode || !showVisualLayer || boxW <= 0 || fullW <= 0) return null;
+    if (!cropMode || !visualClip || boxW <= 0 || fullW <= 0) return null;
     const shade: React.CSSProperties = {
       position: 'absolute',
       background: 'rgba(0,0,0,0.55)',
@@ -991,8 +1086,8 @@ export default function PreviewPanel() {
         return;
       }
 
-      const { visualClip: vc, visualMedia: vm, audioClip: ac, audioMedia: am } =
-        findTimelineClips(proj, head);
+      const { audioClip: ac, audioMedia: am } = findTimelineClips(proj, head);
+      const { track: ht, clip: hc, media: hm } = findBaseClip(proj, head);
 
       // While the picture element is seeking (or still loading data), hold the
       // playhead still so the seek target can't run away — re-seeking every
@@ -1001,10 +1096,10 @@ export default function PreviewPanel() {
       let holdForSeek = false;
       const v = timelineVideoRef.current;
       if (v) {
-        if (vm?.kind === 'video' && vc) {
-          ensureSrc(v, loadedTimelineVideoId, vm);
-          applyProps(v, vc);
-          const target = vc.inSec + (head - vc.startSec) * vc.speed;
+        if (hm?.kind === 'video' && hc) {
+          ensureSrc(v, loadedTimelineVideoId, hm);
+          applyProps(v, hc);
+          const target = hc.inSec + (head - hc.startSec) * hc.speed;
           const drifted = Math.abs(v.currentTime - Math.max(0, target)) > 0.35;
           const seekOutstanding = syncClock(v, target, 0.35);
           if ((drifted || v.seeking) && (seekOutstanding || v.readyState < 2)) {
@@ -1029,7 +1124,7 @@ export default function PreviewPanel() {
       }
 
       // Overlay videos + extra audio tracks follow along (best-effort).
-      syncExtraLayers(head, proj, false, vc?.id, ac?.id);
+      syncExtraLayers(head, proj, false, ht?.id, hc?.id, ac?.id);
 
       if (holdForSeek) {
         if (seekHoldStart.current == null) seekHoldStart.current = now;
@@ -1061,13 +1156,14 @@ export default function PreviewPanel() {
   useEffect(() => {
     if (previewMode !== 'timeline' || playing) return;
     if (!project) return;
+    const { track: ht, clip: hc, media: hm } = findBaseClip(project, playhead);
     const v = timelineVideoRef.current;
     if (v) {
-      if (visualMedia?.kind === 'video' && visualClip) {
-        ensureSrc(v, loadedTimelineVideoId, visualMedia);
-        applyProps(v, visualClip);
+      if (hm?.kind === 'video' && hc) {
+        ensureSrc(v, loadedTimelineVideoId, hm);
+        applyProps(v, hc);
         if (!v.paused) v.pause();
-        syncClock(v, visualClip.inSec + (playhead - visualClip.startSec) * visualClip.speed, 0.04);
+        syncClock(v, hc.inSec + (playhead - hc.startSec) * hc.speed, 0.04);
       } else if (!v.paused) {
         v.pause();
       }
@@ -1083,8 +1179,8 @@ export default function PreviewPanel() {
         a.pause();
       }
     }
-    syncExtraLayers(playhead, project, true, visualClip?.id, activeAudioClip?.id);
-  }, [previewMode, playing, playhead, project, visualClip, visualMedia, activeAudioClip, activeAudioMedia]);
+    syncExtraLayers(playhead, project, true, ht?.id, hc?.id, activeAudioClip?.id);
+  }, [previewMode, playing, playhead, project, heroClip, heroMedia, heroTrack, activeAudioClip, activeAudioMedia]);
 
   // -------------------------------------------------------------
   // 3) Source playback: same wall-clock pattern. Deps exclude the
@@ -1291,7 +1387,7 @@ export default function PreviewPanel() {
             <button
               className={`icon${cropMode ? ' accent' : ''}`}
               title={cropMode ? 'Exit crop mode (Esc)' : 'Crop mode'}
-              disabled={!showVisualLayer}
+              disabled={!visualClip}
               onClick={() => setCropMode(!cropMode)}
               style={{ display: 'inline-flex', alignItems: 'center' }}
             >
@@ -1325,8 +1421,13 @@ export default function PreviewPanel() {
               {/* Lower timeline layers render under the main clip. */}
               {extraLayers.below.map(renderStackLayer)}
 
-              {/* Transformable video layer (always mounted so the ref stays valid). */}
-              <div className="canvas-layer" style={layerStyle} {...layerPointerHandlers}>
+              {/* Transformable video layer (always mounted so the ref stays valid).
+                  Shows the base picture clip; interactive only when it is the uiClip. */}
+              <div
+                className="canvas-layer"
+                style={layerStyle}
+                {...(uiClip?.id === heroClip?.id ? layerPointerHandlers : {})}
+              >
                 <div className="canvas-inner" style={innerWithFilter}>
                   <video
                     ref={timelineVideoRef}
@@ -1341,11 +1442,15 @@ export default function PreviewPanel() {
                 </div>
               </div>
 
-              {/* Transformable image layer. */}
-              {visualMedia?.kind === 'image' && visualClip && (
-                <div className="canvas-layer" style={layerStyle} {...layerPointerHandlers}>
+              {/* Transformable image layer (base picture is a still). */}
+              {heroMedia?.kind === 'image' && heroClip && (
+                <div
+                  className="canvas-layer"
+                  style={layerStyle}
+                  {...(uiClip?.id === heroClip?.id ? layerPointerHandlers : {})}
+                >
                   <div className="canvas-inner" style={innerWithFilter}>
-                    <img src={window.taxicut.mediaUrl(visualMedia.path)} alt="" draggable={false} />
+                    <img src={window.taxicut.mediaUrl(heroMedia.path)} alt="" draggable={false} />
                   </div>
                 </div>
               )}
@@ -1414,16 +1519,16 @@ export default function PreviewPanel() {
               )}
               {renderTextHandles()}
 
-              {/* Timeline audio-only indicator (no video clip under playhead but audio is present). */}
-              {!visualClip && (activeAudioMedia || visualMedia?.kind === 'audio') && (
+              {/* Timeline audio-only indicator (no picture under playhead but audio is present). */}
+              {!heroClip && !overlayVisualActive && activeAudioMedia && (
                 <div className="preview-audio-indicator" style={{ position: 'absolute', inset: 0, justifyContent: 'center' }}>
                   <span className="audio-icon"><IconAudio size={42} /></span>
-                  <span className="audio-title">{(activeAudioMedia ?? visualMedia)?.name}</span>
+                  <span className="audio-title">{activeAudioMedia.name}</span>
                 </div>
               )}
 
               {/* Timeline empty state */}
-              {!visualClip && !activeAudioMedia && (
+              {!heroClip && !overlayVisualActive && !activeAudioMedia && (
                 <div className="preview-empty-stage" style={{ position: 'absolute', inset: 0 }}>
                   {tracks.every((t) => t.clips.length === 0) ? (
                     <div className="preview-empty-hint">
