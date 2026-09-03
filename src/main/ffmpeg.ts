@@ -88,6 +88,79 @@ function dbToGain(db: number): number {
   return Math.pow(10, db / 20);
 }
 
+const clampInt = (v: number, lo: number, hi: number): number =>
+  Math.max(lo, Math.min(hi, Math.round(v)));
+/** Round to a positive even int (yuv420p-safe dimension). */
+const evenUp = (v: number): number => Math.max(2, Math.round(v / 2) * 2);
+/** Round down to an even int within [2, limit] (crop-safe dimension). */
+const evenDown = (v: number, limit: number): number => {
+  const c = Math.max(2, Math.min(limit, Math.floor(v)));
+  return Math.min(c - (c % 2), limit - (limit % 2));
+};
+
+/**
+ * Video filter mapping a clip onto the W×H canvas, mirroring the preview:
+ * source crop, then contain-fit base, then user scale (multiplier) and x/y
+ * offset (fractions of canvas size, 0 = centered). Identity settings keep
+ * the legacy filter.
+ */
+export function clipVideoFilter(
+  media: MediaAsset | undefined,
+  clip: Clip,
+  W: number,
+  H: number,
+  FPS: number,
+): string {
+  const tail = `setsar=1,fps=${FPS},format=yuv420p`;
+  const s = Number.isFinite(clip.scale) && clip.scale > 0 ? clip.scale : 1;
+  const ox = Number.isFinite(clip.posX) ? clip.posX : 0;
+  const oy = Number.isFinite(clip.posY) ? clip.posY : 0;
+  const cl = Number.isFinite(clip.cropL) ? clip.cropL : 0;
+  const ct = Number.isFinite(clip.cropT) ? clip.cropT : 0;
+  const cr = Number.isFinite(clip.cropR) ? clip.cropR : 0;
+  const cb = Number.isFinite(clip.cropB) ? clip.cropB : 0;
+  let mw = media && media.width > 0 ? media.width : 0;
+  let mh = media && media.height > 0 ? media.height : 0;
+  const parts: string[] = [];
+  if ((cl > 0 || ct > 0 || cr > 0 || cb > 0) && mw > 0 && mh > 0 && cl + cr < 1 && ct + cb < 1) {
+    const cwS = evenDown(mw * (1 - cl - cr), mw);
+    const chS = evenDown(mh * (1 - ct - cb), mh);
+    const cxS = clampInt(mw * cl, 0, mw - cwS) & ~1;
+    const cyS = clampInt(mh * ct, 0, mh - chS) & ~1;
+    parts.push(`crop=${cwS}:${chS}:${cxS}:${cyS}`);
+    mw = cwS;
+    mh = chS;
+  }
+  if ((Math.abs(s - 1) < 1e-6 && ox === 0 && oy === 0) || mw === 0 || mh === 0) {
+    if (parts.length === 0) {
+      return `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,${tail}`;
+    }
+    parts.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black`);
+    parts.push(tail);
+    return parts.join(',');
+  }
+  const f = Math.min(W / mw, H / mh);
+  const dw = evenUp(mw * f * s);
+  const dh = evenUp(mh * f * s);
+  parts.push(`scale=${dw}:${dh}`);
+  let cw = dw;
+  let ch = dh;
+  if (dw > W || dh > H) {
+    cw = evenDown(Math.min(dw, W), dw);
+    ch = evenDown(Math.min(dh, H), dh);
+    const cx = clampInt((dw - cw) / 2 - ox * W, 0, dw - cw) & ~1;
+    const cy = clampInt((dh - ch) / 2 - oy * H, 0, dh - ch) & ~1;
+    parts.push(`crop=${cw}:${ch}:${cx}:${cy}`);
+  }
+  if (cw < W || ch < H) {
+    const px = clampInt((W - cw) / 2 + ox * W, 0, W - cw);
+    const py = clampInt((H - ch) / 2 + oy * H, 0, H - ch);
+    parts.push(`pad=${W}:${H}:${px}:${py}:black`);
+  }
+  parts.push(tail);
+  return parts.join(',');
+}
+
 function srtTime(sec: number): string {
   const ms = Math.round(sec * 1000);
   const h = Math.floor(ms / 3600000);
@@ -172,12 +245,13 @@ export async function exportProject(
           args.push('-f', 'lavfi', '-t', dur.toFixed(3), '-i', `color=c=black:s=${W}x${H}:r=${FPS}`);
         }
         const hasSrcAudio = media?.hasAudio && media.kind !== 'image';
+        const clipVf = clipVideoFilter(media, clip, W, H, FPS);
         if (hasSrcAudio) {
-          args.push('-vf', vf, '-af', audioFilter, '-c:v', 'libx264', '-preset', 'veryfast',
+          args.push('-vf', clipVf, '-af', audioFilter, '-c:v', 'libx264', '-preset', 'veryfast',
             '-crf', String(opts.crf ?? 18), '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-shortest', seg);
         } else {
           args.push('-f', 'lavfi', '-t', dur.toFixed(3), '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
-            '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(opts.crf ?? 18),
+            '-vf', clipVf, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(opts.crf ?? 18),
             '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-shortest', seg);
         }
         await run(FFMPEG, args, { maxBuffer: 4 * 1024 * 1024 });

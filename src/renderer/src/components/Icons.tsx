@@ -217,3 +217,26 @@ export const IconUpload: React.FC<IconProps> = ({ size = 14, className, style })
     <line x1="12" y1="3" x2="12" y2="15" />
   </svg>
 );
+
+export const IconCenter: React.FC<IconProps> = ({ size = 14, className, style }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} style={style}>
+    <circle cx="12" cy="12" r="2.5" />
+    <line x1="12" y1="2" x2="12" y2="7" />
+    <line x1="12" y1="17" x2="12" y2="22" />
+    <line x1="2" y1="12" x2="7" y2="12" />
+    <line x1="17" y1="12" x2="22" y2="12" />
+  </svg>
+);
+
+export const IconCrop: React.FC<IconProps> = ({ size = 14, className, style }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} style={style}>
+    <path d="M6.13 1 6 16a2 2 0 0 0 2 2h15" />
+    <path d="M1 6.13 16 6a2 2 0 0 1 2 2v15" />
+  </svg>
+);
+
+export const IconCheck: React.FC<IconProps> = ({ size = 14, className, style }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className} style={style}>
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);

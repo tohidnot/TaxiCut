@@ -35,6 +35,53 @@ export interface Clip {
   kind: MediaKind;
   /** Present on text/subtitle clips (mediaId === 'text'). */
   text?: string;
+  /** Canvas transform: scale multiplier (1 = contain-fit) and x/y offset
+   *  in fractions of the canvas width/height (0 = centered). */
+  scale: number;
+  posX: number;
+  posY: number;
+  /** Crop insets as fractions of the source dimensions (0 = no crop). */
+  cropL: number;
+  cropT: number;
+  cropR: number;
+  cropB: number;
+}
+
+/** Canvas (output frame) aspect ratio. */
+export type CanvasAspect = '16:9' | '9:16' | '1:1' | '4:3' | '4:5' | 'custom';
+
+export const CANVAS_ASPECTS: CanvasAspect[] = ['16:9', '9:16', '1:1', '4:3', '4:5'];
+
+export function isPresetAspect(a: string): a is Exclude<CanvasAspect, 'custom'> {
+  return (CANVAS_ASPECTS as string[]).includes(a);
+}
+
+/** Preview canvas dimensions for an aspect (pixel values only define the ratio). */
+export function canvasSize(aspect: CanvasAspect, customW = 0, customH = 0): { width: number; height: number } {
+  if (aspect === 'custom') {
+    const w = Number.isFinite(customW) && customW >= 16 ? Math.round(customW) : 1920;
+    const h = Number.isFinite(customH) && customH >= 16 ? Math.round(customH) : 1080;
+    return { width: w, height: h };
+  }
+  switch (aspect) {
+    case '9:16': return { width: 1080, height: 1920 };
+    case '1:1': return { width: 1080, height: 1080 };
+    case '4:3': return { width: 1440, height: 1080 };
+    case '4:5': return { width: 1080, height: 1350 };
+    case '16:9':
+    default: return { width: 1920, height: 1080 };
+  }
+}
+
+/** Export pixel dimensions: presets map to fixed sizes, custom fits in 1920px. */
+export function exportSize(aspect: CanvasAspect, customW = 0, customH = 0): { width: number; height: number } {
+  if (aspect !== 'custom' || !Number.isFinite(customW) || !Number.isFinite(customH) || customW < 16 || customH < 16) {
+    return canvasSize(isPresetAspect(aspect) ? aspect : '16:9');
+  }
+  const f = Math.min(1920 / customW, 1920 / customH, 1);
+  const w = Math.max(2, Math.round((customW * f) / 2) * 2);
+  const h = Math.max(2, Math.round((customH * f) / 2) * 2);
+  return { width: w, height: h };
 }
 
 export interface Track {
@@ -49,6 +96,11 @@ export interface Track {
 export interface Project {
   version: 1;
   name: string;
+  /** Canvas aspect ratio for preview and export. Defaults to '16:9'. */
+  aspect: CanvasAspect;
+  /** Custom canvas pixel size (used when aspect === 'custom'). */
+  customW: number;
+  customH: number;
   media: MediaAsset[];
   tracks: Track[];
   modified: boolean;
@@ -103,7 +155,8 @@ export type MainOp =
   | { op: 'timeline:trimClip'; clipId: string; edge: 'in' | 'out'; deltaSec: number }
   | { op: 'timeline:splitClip'; clipId: string; atSec: number }
   | { op: 'timeline:deleteClip'; clipId: string; ripple?: boolean }
-  | { op: 'clip:setProps'; clipId: string; volumeDb?: number; speed?: number; fadeInSec?: number; fadeOutSec?: number; text?: string; name?: string }
+  | { op: 'clip:setProps'; clipId: string; volumeDb?: number; speed?: number; fadeInSec?: number; fadeOutSec?: number; text?: string; name?: string; scale?: number; posX?: number; posY?: number; cropL?: number; cropT?: number; cropR?: number; cropB?: number }
+  | { op: 'project:setAspect'; aspect: string; width?: number; height?: number }
   | { op: 'track:add'; kind: TrackKind }
   | { op: 'track:delete'; trackId: string }
   | { op: 'track:setMute'; trackId: string; muted: boolean }
