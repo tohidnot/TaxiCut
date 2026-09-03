@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useEditor, op } from '../store';
 import { formatDuration } from '../time';
-import { canvasSize } from '../../../shared/types';
+import { canvasSize, CLIP_FILTERS, DEFAULT_CLIP_COLOR, FONT_FAMILIES, TEXT_TEMPLATES } from '../../../shared/types';
 import type { Clip } from '../../../shared/types';
 import { IconPlus, IconSubtitles } from './Icons';
 
@@ -144,7 +144,7 @@ export default function InspectorPanel() {
               <span>x</span>
             </div>
           </div>
-          {(clip.kind === 'video' || clip.kind === 'image') && (
+          {(clip.kind === 'video' || clip.kind === 'image' || clip.kind === 'text') && (
             <div>
               <h3>TRANSFORM</h3>
               <div className="insp-row">
@@ -175,60 +175,75 @@ export default function InspectorPanel() {
                   onChange={(e) => set({ posY: Number(e.target.value) })}
                 />
               </div>
-              <div className="insp-row">
-                <button
-                  title="Fit whole video in canvas"
-                  style={{ flex: 1 }}
-                  onClick={() => set({ scale: 1, posX: 0, posY: 0 })}
-                >
-                  Fit
-                </button>
-                <button
-                  title="Fill the whole canvas (crops overflow)"
-                  style={{ flex: 1 }}
-                  onClick={() => set({ scale: Math.round(fillScale * 100) / 100, posX: 0, posY: 0 })}
-                >
-                  Fill
-                </button>
-                <button
-                  title="Center video on canvas"
-                  style={{ flex: 1 }}
-                  onClick={() => set({ posX: 0, posY: 0 })}
-                >
-                  Center
-                </button>
-              </div>
-              <div className="insp-row" style={{ alignItems: 'center' }}>
-                <span>Align</span>
-                <div className="align-grid">
-                  {ALIGN_SPOTS.map((a) => (
+              {(clip.kind === 'video' || clip.kind === 'image') && (
+                <>
+                  <div className="insp-row">
                     <button
-                      key={a.id}
-                      className="align-btn"
-                      title={`Align ${a.id === 'c' ? 'center' : a.id}`}
-                      onClick={() => set({ posX: alignPos(a.x, fw), posY: alignPos(a.y, fh) })}
+                      title="Fit whole video in canvas"
+                      style={{ flex: 1 }}
+                      onClick={() => set({ scale: 1, posX: 0, posY: 0 })}
                     >
-                      <span
-                        className="align-dot"
-                        style={{
-                          left: a.x === -1 ? 3 : a.x === 1 ? undefined : '50%',
-                          right: a.x === 1 ? 3 : undefined,
-                          top: a.y === -1 ? 3 : a.y === 1 ? undefined : '50%',
-                          bottom: a.y === 1 ? 3 : undefined,
-                          transform:
-                            a.x === 0 && a.y === 0
-                              ? 'translate(-50%,-50%)'
-                              : a.x === 0
-                                ? 'translateX(-50%)'
-                                : a.y === 0
-                                  ? 'translateY(-50%)'
-                                  : undefined,
-                        }}
-                      />
+                      Fit
                     </button>
-                  ))}
+                    <button
+                      title="Fill the whole canvas (crops overflow)"
+                      style={{ flex: 1 }}
+                      onClick={() => set({ scale: Math.round(fillScale * 100) / 100, posX: 0, posY: 0 })}
+                    >
+                      Fill
+                    </button>
+                    <button
+                      title="Center video on canvas"
+                      style={{ flex: 1 }}
+                      onClick={() => set({ posX: 0, posY: 0 })}
+                    >
+                      Center
+                    </button>
+                  </div>
+                  <div className="insp-row" style={{ alignItems: 'center' }}>
+                    <span>Align</span>
+                    <div className="align-grid">
+                      {ALIGN_SPOTS.map((a) => (
+                        <button
+                          key={a.id}
+                          className="align-btn"
+                          title={`Align ${a.id === 'c' ? 'center' : a.id}`}
+                          onClick={() => set({ posX: alignPos(a.x, fw), posY: alignPos(a.y, fh) })}
+                        >
+                          <span
+                            className="align-dot"
+                            style={{
+                              left: a.x === -1 ? 3 : a.x === 1 ? undefined : '50%',
+                              right: a.x === 1 ? 3 : undefined,
+                              top: a.y === -1 ? 3 : a.y === 1 ? undefined : '50%',
+                              bottom: a.y === 1 ? 3 : undefined,
+                              transform:
+                                a.x === 0 && a.y === 0
+                                  ? 'translate(-50%,-50%)'
+                                  : a.x === 0
+                                    ? 'translateX(-50%)'
+                                    : a.y === 0
+                                      ? 'translateY(-50%)'
+                                      : undefined,
+                            }}
+                          />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+              {clip.kind === 'text' && (
+                <div className="insp-row">
+                  <button
+                    title="Center text on canvas"
+                    style={{ flex: 1 }}
+                    onClick={() => set({ posX: 0, posY: 0 })}
+                  >
+                    Center
+                  </button>
                 </div>
-              </div>
+              )}
               <div className="insp-row">
                 <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>
                   Tip: drag the video in the viewer to move it, drag a corner to resize.
@@ -302,6 +317,185 @@ export default function InspectorPanel() {
                   onClick={() => set({ cropL: 0, cropT: 0, cropR: 0, cropB: 0 })}
                 >
                   Reset crop
+                </button>
+              </div>
+            </div>
+          )}
+          {clip.kind === 'text' && (
+            <div>
+              <h3>TEXT</h3>
+              <div className="tpl-grid">
+                {TEXT_TEMPLATES.map((t) => (
+                  <button
+                    key={t.id}
+                    className="tpl-btn"
+                    title={`${t.name} template`}
+                    style={{
+                      fontFamily: t.fontFamily,
+                      color: t.textColor,
+                      background: t.textBg || 'var(--bg2)',
+                      fontWeight: t.bold ? 700 : 400,
+                    }}
+                    onClick={() =>
+                      set({
+                        fontFamily: t.fontFamily,
+                        fontSize: t.fontSize,
+                        textColor: t.textColor,
+                        textBg: t.textBg,
+                        bold: t.bold,
+                        textAlign: t.textAlign,
+                        scale: t.scale,
+                        posX: t.posX,
+                        posY: t.posY,
+                      })
+                    }
+                  >
+                    Ag
+                    <small>{t.name}</small>
+                  </button>
+                ))}
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <textarea
+                  rows={3}
+                  value={clip.text ?? ''}
+                  onChange={(e) => set({ text: e.target.value })}
+                  placeholder="Text overlay…"
+                  style={{ width: '100%', resize: 'vertical' }}
+                />
+              </div>
+              <div className="insp-row" style={{ marginTop: 8 }}>
+                <span>Font</span>
+                <select
+                  value={clip.fontFamily || 'Arial'}
+                  onChange={(e) => set({ fontFamily: e.target.value })}
+                  style={{ flex: 1, minWidth: 0 }}
+                >
+                  {FONT_FAMILIES.map((f) => (
+                    <option key={f} value={f}>{f}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="insp-row">
+                <span>Size</span>
+                <input
+                  type="range"
+                  min={16}
+                  max={240}
+                  step={2}
+                  value={clip.fontSize ?? 72}
+                  onChange={(e) => set({ fontSize: Number(e.target.value) })}
+                />
+                <span>{clip.fontSize ?? 72}px</span>
+              </div>
+              <div className="insp-row">
+                <span>Color</span>
+                <input
+                  type="color"
+                  value={clip.textColor || '#ffffff'}
+                  onChange={(e) => set({ textColor: e.target.value })}
+                />
+                <span>BG</span>
+                <input
+                  type="color"
+                  value={clip.textBg || '#000000'}
+                  onChange={(e) => set({ textBg: e.target.value })}
+                />
+                <button
+                  title="Transparent background"
+                  disabled={!clip.textBg}
+                  onClick={() => set({ textBg: '' })}
+                >
+                  Clear
+                </button>
+              </div>
+              <div className="insp-row">
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={!!clip.bold}
+                    onChange={(e) => set({ bold: e.target.checked })}
+                    style={{ accentColor: 'var(--accent)' }}
+                  />
+                  Bold
+                </label>
+                <span style={{ display: 'inline-flex', gap: 4 }}>
+                  {(['left', 'center', 'right'] as const).map((a) => (
+                    <button
+                      key={a}
+                      title={`Align ${a}`}
+                      onClick={() => set({ textAlign: a })}
+                      style={{
+                        fontWeight: (clip.textAlign || 'center') === a ? 700 : 400,
+                        borderColor: (clip.textAlign || 'center') === a ? 'var(--accent)' : undefined,
+                        textTransform: 'capitalize',
+                      }}
+                    >
+                      {a[0].toUpperCase()}
+                    </button>
+                  ))}
+                </span>
+              </div>
+              <div className="insp-row">
+                <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>
+                  Tip: double-click the text in the viewer to edit it there.
+                </span>
+              </div>
+            </div>
+          )}
+          {(clip.kind === 'video' || clip.kind === 'image') && (
+            <div>
+              <h3>FILTER</h3>
+              <div className="filter-grid">
+                {CLIP_FILTERS.map((f) => (
+                  <button
+                    key={f.id || 'none'}
+                    className={`filter-btn${(clip.filter || '') === f.id ? ' active' : ''}`}
+                    title={f.id ? `${f.name} look` : 'No filter'}
+                    onClick={() => set({ filter: f.id })}
+                  >
+                    {f.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {(clip.kind === 'video' || clip.kind === 'image') && (
+            <div>
+              <h3>COLOR GRADE</h3>
+              {(
+                [
+                  { key: 'exposure', label: 'Exposure', min: -1, max: 1, step: 0.05 },
+                  { key: 'contrast', label: 'Contrast', min: 0, max: 2, step: 0.05 },
+                  { key: 'saturation', label: 'Saturation', min: 0, max: 2, step: 0.05 },
+                  { key: 'warmth', label: 'Warmth', min: -1, max: 1, step: 0.05 },
+                ] as const
+              ).map((s) => {
+                const val = clip.color?.[s.key] ?? DEFAULT_CLIP_COLOR[s.key];
+                return (
+                  <div className="insp-row" key={s.key}>
+                    <span>{s.label}</span>
+                    <input
+                      type="range"
+                      min={s.min}
+                      max={s.max}
+                      step={s.step}
+                      value={val}
+                      onChange={(e) =>
+                        set({ color: { ...clip.color, [s.key]: Number(e.target.value) } })
+                      }
+                      title={`${s.label}: ${val.toFixed(2)}`}
+                    />
+                    <span style={{ color: 'var(--text-dim)', minWidth: 36, textAlign: 'right' }}>
+                      {val.toFixed(2)}
+                    </span>
+                  </div>
+                );
+              })}
+              <div className="insp-row">
+                <span />
+                <button className="icon" onClick={() => set({ color: { ...DEFAULT_CLIP_COLOR } })}>
+                  Reset grade
                 </button>
               </div>
             </div>

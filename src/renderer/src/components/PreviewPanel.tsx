@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useEditor, op } from '../store';
 import { formatTimecode } from '../time';
-import { canvasSize, type CanvasAspect, type Clip, type MediaAsset, type Project } from '../../../shared/types';
+import { canvasSize, clipColorCss, clipFilterById, type CanvasAspect, type Clip, type MediaAsset, type Project, type Track } from '../../../shared/types';
 import {
   IconPlay,
   IconPause,
@@ -41,20 +41,38 @@ interface ActiveTimelineClips {
   visualMedia?: MediaAsset;
   audioClip?: Clip;
   audioMedia?: MediaAsset;
+  textClip?: Clip;
+}
+
+function allProjectClips(project: Project): Clip[] {
+  return (project.tracks ?? []).flatMap((t) => t.clips);
+}
+
+function findClipInProject(project: Project, id: string): Clip | undefined {
+  return allProjectClips(project).find((c) => c.id === id);
 }
 
 /** Topmost unmuted video-track clip wins the picture; first unmuted audio clip wins the extra audio element. */
 function findTimelineClips(project: Project, head: number): ActiveTimelineClips {
   const tracks = project.tracks ?? [];
   let visualClip: Clip | undefined;
+  let textClip: Clip | undefined;
   for (let i = tracks.length - 1; i >= 0; i--) {
     const t = tracks[i];
     if (t.kind !== 'video' || t.muted) continue;
-    const found = t.clips.find((c) => head >= c.startSec && head < c.startSec + c.durationSec);
-    if (found) {
-      visualClip = found;
-      break;
+    if (!visualClip) {
+      const found = t.clips.find(
+        (c) => c.kind !== 'text' && head >= c.startSec && head < c.startSec + c.durationSec,
+      );
+      if (found) visualClip = found;
     }
+    if (!textClip) {
+      const foundText = t.clips.find(
+        (c) => c.kind === 'text' && head >= c.startSec && head < c.startSec + c.durationSec,
+      );
+      if (foundText) textClip = foundText;
+    }
+    if (visualClip && textClip) break;
   }
   let audioClip: Clip | undefined;
   for (const t of tracks) {
@@ -67,7 +85,57 @@ function findTimelineClips(project: Project, head: number): ActiveTimelineClips 
   }
   const visualMedia = visualClip ? project.media.find((m) => m.id === visualClip.mediaId) : undefined;
   const audioMedia = audioClip ? project.media.find((m) => m.id === audioClip.mediaId) : undefined;
-  return { visualClip, visualMedia, audioClip, audioMedia };
+  return { visualClip, visualMedia, audioClip, audioMedia, textClip };
+}
+
+/** One composited timeline layer (upper video tracks, extra audio tracks). */
+interface StackLayer {
+  track: Track;
+  clip: Clip;
+  media?: MediaAsset;
+}
+
+function clipActiveAt(c: Clip, head: number): boolean {
+  return head >= c.startSec && head < c.startSec + c.durationSec;
+}
+
+/**
+ * All active layers besides the main interactive clip, bottom-to-top:
+ * - `below`: active non-text clips on video tracks under the main clip's track
+ * - `above`: active non-text clips on video tracks over it
+ * - `audio`: active clips on unmuted audio tracks (the caller drives the
+ *   first one through the main audio element and these as extras)
+ * Mirrors the export compositor (V1 base, upper layers over it, all audio mixed).
+ */
+function findTimelineLayers(
+  project: Project,
+  head: number,
+  mainClipId?: string,
+): { below: StackLayer[]; above: StackLayer[]; audio: StackLayer[] } {
+  const tracks = project.tracks ?? [];
+  const below: StackLayer[] = [];
+  const above: StackLayer[] = [];
+  const audio: StackLayer[] = [];
+  let mainIdx = tracks.length;
+  if (mainClipId) {
+    const i = tracks.findIndex((t) => t.clips.some((c) => c.id === mainClipId));
+    if (i >= 0) mainIdx = i;
+  }
+  tracks.forEach((t, i) => {
+    if (t.muted) return;
+    if (t.kind === 'video') {
+      const clip = t.clips.find((c) => c.kind !== 'text' && c.id !== mainClipId && clipActiveAt(c, head));
+      if (!clip) return;
+      const layer = { track: t, clip, media: project.media.find((m) => m.id === clip.mediaId) };
+      if (i < mainIdx) below.push(layer);
+      else above.push(layer);
+    } else {
+      const clip = t.clips.find((c) => clipActiveAt(c, head));
+      if (!clip) return;
+      audio.push({ track: t, clip, media: project.media.find((m) => m.id === clip.mediaId) });
+    }
+  });
+  return { below, above, audio };
 }
 
 /** Point the element at this media if it isn't already. Keeps the decoder warm across gaps. */
@@ -207,13 +275,37 @@ export default function PreviewPanel() {
     ? project?.media.find((m) => m.id === selectedMediaId)
     : undefined;
 
-  const { visualClip, visualMedia, audioClip: activeAudioClip, audioMedia: activeAudioMedia } =
+  const { visualClip, visualMedia, audioClip: activeAudioClip, audioMedia: activeAudioMedia, textClip } =
     project ? findTimelineClips(project, playhead) : {};
+
+  // Extra composited layers (upper/lower video layers + 2nd+ audio tracks),
+  // bottom-to-top within each group. The main interactive clip is excluded.
+  const extraLayers = project
+    ? findTimelineLayers(project, playhead, visualClip?.id)
+    : { below: [], above: [], audio: [] };
+  // Per-element refs for the best-effort layer sync (keyed by track/clip id).
+  const layerVideoRefs = useRef(new Map<string, HTMLVideoElement>());
+  const layerAudioRefs = useRef(new Map<string, HTMLAudioElement>());
+  const loadedLayerSrc = useRef(new Map<string, string>());
+  const setLayerVideoRef = (key: string) => (el: HTMLVideoElement | null) => {
+    if (el) layerVideoRefs.current.set(key, el);
+    else layerVideoRefs.current.delete(key);
+  };
+  const setLayerAudioRef = (key: string) => (el: HTMLAudioElement | null) => {
+    if (el) layerAudioRefs.current.set(key, el);
+    else layerAudioRefs.current.delete(key);
+  };
 
   const activeSubtitleClip = tracks
     .filter((t) => !t.muted)
     .flatMap((t) => t.clips)
-    .find((c) => c.text && playhead >= c.startSec && playhead < c.startSec + c.durationSec);
+    .find(
+      (c) =>
+        c.kind !== 'text' &&
+        c.text &&
+        playhead >= c.startSec &&
+        playhead < c.startSec + c.durationSec,
+    );
   const subtitleText = activeSubtitleClip?.text;
 
   const currentFps = visualMedia?.fps || 30;
@@ -300,27 +392,162 @@ export default function PreviewPanel() {
   const keepT = fullT + effC.t * fullH;
   const keepW = fullW * Math.max(0.01, 1 - effC.l - effC.r);
   const keepH = fullH * Math.max(0.01, 1 - effC.t - effC.b);
+  // Live color look for the picture layer (preset + manual grade).
+  const cssFilter = visualClip
+    ? [clipFilterById(visualClip.filter).css, clipColorCss(visualClip.color)]
+      .filter((f) => f && f !== 'none')
+      .join(' ')
+    : '';
+  const innerWithFilter: React.CSSProperties = {
+    ...innerStyle,
+    filter: cssFilter ? cssFilter : undefined,
+  };
   // Transformed rect in box pixels (for the resize handles).
   const rectCX = boxW / 2 + effT.posX * boxW;
   const rectCY = boxH / 2 + effT.posY * boxH;
   const rectW = baseW * effT.scale;
   const rectH = baseH * effT.scale;
 
+  // Static geometry for non-interactive overlay layers (committed values only).
+  const geomFor = (
+    clip: Clip,
+    media: MediaAsset | undefined,
+  ): { layer: React.CSSProperties; inner: React.CSSProperties } => {
+    const mw = media?.width || 0;
+    const mh = media?.height || 0;
+    const c = clipCrop(clip);
+    const cwFrac = Math.max(0.01, 1 - c.l - c.r);
+    const chFrac = Math.max(0.01, 1 - c.t - c.b);
+    const effMW = mw * cwFrac;
+    const effMH = mh * chFrac;
+    const fit = mw > 0 && mh > 0 && boxW > 0 && boxH > 0 ? Math.min(boxW / effMW, boxH / effMH) : 0;
+    const w = fit > 0 ? effMW * fit : boxW;
+    const h = fit > 0 ? effMH * fit : boxH;
+    const t = clipTransform(clip);
+    const css = [clipFilterById(clip.filter).css, clipColorCss(clip.color)]
+      .filter((f) => f && f !== 'none')
+      .join(' ');
+    return {
+      layer: {
+        left: (boxW - w) / 2,
+        top: (boxH - h) / 2,
+        width: w,
+        height: h,
+        transform: `translate(${t.posX * boxW}px, ${t.posY * boxH}px) scale(${t.scale})`,
+        transformOrigin: 'center',
+        pointerEvents: 'none',
+      },
+      inner: {
+        position: 'absolute',
+        width: `${100 / cwFrac}%`,
+        height: `${100 / chFrac}%`,
+        left: `${(-c.l / cwFrac) * 100}%`,
+        top: `${(-c.t / chFrac) * 100}%`,
+        filter: css ? css : undefined,
+      },
+    };
+  };
+
+  // Best-effort sync for extra layers: overlay videos follow the playhead and
+  // 2nd+ audio tracks mix in. Loose threshold, no stall logic — the main
+  // picture/audio path above is untouched and always wins.
+  const syncExtraLayers = (
+    head: number,
+    proj: Project,
+    paused: boolean,
+    mainVisualId?: string,
+    mainAudioId?: string,
+  ) => {
+    const { below, above, audio } = findTimelineLayers(proj, head, mainVisualId);
+    const thresh = paused ? 0.04 : 0.4;
+    for (const l of [...below, ...above]) {
+      if (l.media?.kind !== 'video') continue;
+      const el = layerVideoRefs.current.get(l.clip.id);
+      if (!el) continue;
+      if (loadedLayerSrc.current.get(l.clip.id) !== l.media.id) {
+        loadedLayerSrc.current.set(l.clip.id, l.media.id);
+        el.src = window.taxicut.mediaUrl(l.media.path);
+        el.load();
+      }
+      applyProps(el, l.clip);
+      const target = l.clip.inSec + (head - l.clip.startSec) * l.clip.speed;
+      syncClock(el, target, thresh);
+      if (paused) {
+        if (!el.paused) el.pause();
+      } else {
+        playQuiet(el);
+      }
+    }
+    for (const t of proj.tracks ?? []) {
+      if (t.kind !== 'audio') continue;
+      const el = layerAudioRefs.current.get(t.id);
+      if (!el) continue;
+      const layer = audio.find((x) => x.track.id === t.id);
+      if (!layer || !layer.media || layer.clip.id === mainAudioId) {
+        if (!el.paused) el.pause();
+        continue;
+      }
+      const key = `a:${t.id}`;
+      if (loadedLayerSrc.current.get(key) !== layer.media.id) {
+        loadedLayerSrc.current.set(key, layer.media.id);
+        el.src = window.taxicut.mediaUrl(layer.media.path);
+        el.load();
+      }
+      applyProps(el, layer.clip);
+      syncClock(el, layer.clip.inSec + (head - layer.clip.startSec) * layer.clip.speed, thresh);
+      if (!paused) playQuiet(el);
+    }
+  };
+  const pauseExtraLayers = () => {
+    for (const el of layerVideoRefs.current.values()) {
+      try {
+        el.pause();
+      } catch {
+        /* noop */
+      }
+    }
+    for (const el of layerAudioRefs.current.values()) {
+      try {
+        el.pause();
+      } catch {
+        /* noop */
+      }
+    }
+  };
+
+  // Non-interactive composited layer (upper/lower video tracks). Images are
+  // exact; videos follow the playhead via the best-effort sync above.
+  const renderStackLayer = (l: StackLayer) => {
+    if (l.media?.kind !== 'video' && l.media?.kind !== 'image') return null;
+    const g = geomFor(l.clip, l.media);
+    return (
+      <div className="canvas-layer" key={l.clip.id} style={g.layer}>
+        <div className="canvas-inner" style={g.inner}>
+          {l.media.kind === 'image' ? (
+            <img src={window.taxicut.mediaUrl(l.media.path)} alt="" draggable={false} />
+          ) : (
+            <video ref={setLayerVideoRef(l.clip.id)} playsInline preload="auto" />
+          )}
+        </div>
+      </div>
+    );
+  };
+
   // -------------------------------------------------------------
   // Canvas drag (move) + corner-drag (uniform scale), CapCut-style.
   // Live state only; committed to the clip on pointer-up (one undo step).
   // -------------------------------------------------------------
-  const beginDrag = (e: React.PointerEvent, mode: 'move' | 'scale') => {
+  const beginDrag = (e: React.PointerEvent, mode: 'move' | 'scale', target: Clip | undefined) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!visualClip || boxW <= 0 || boxH <= 0 || cropMode) return;
-    const t = clipTransform(visualClip);
+    if (!target || boxW <= 0 || boxH <= 0 || cropMode) return;
+    const t = clipTransform(target);
     const box = boxRef.current?.getBoundingClientRect();
     const centerX = box ? box.left + box.width / 2 + t.posX * boxW : e.clientX;
     const centerY = box ? box.top + box.height / 2 + t.posY * boxH : e.clientY;
     dragRef.current = {
       mode,
-      clipId: visualClip.id,
+      clipId: target.id,
       startX: e.clientX,
       startY: e.clientY,
       lastX: e.clientX,
@@ -331,7 +558,7 @@ export default function PreviewPanel() {
       orig: t,
     };
     setDragging(true);
-    setLiveT({ id: visualClip.id, ...t });
+    setLiveT({ id: target.id, ...t });
     try {
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     } catch {
@@ -341,7 +568,10 @@ export default function PreviewPanel() {
 
   const moveDrag = (e: React.PointerEvent) => {
     const d = dragRef.current;
-    if (!d || !visualClip || d.clipId !== visualClip.id || boxW <= 0 || boxH <= 0) return;
+    if (!d || boxW <= 0 || boxH <= 0) return;
+    const proj = useEditor.getState().project;
+    const target = proj ? findClipInProject(proj, d.clipId) : undefined;
+    if (!target) return;
     d.lastX = e.clientX;
     d.lastY = e.clientY;
     if (d.mode === 'move') {
@@ -421,7 +651,7 @@ export default function PreviewPanel() {
             key={c.id}
             className="canvas-handle"
             style={{ left: c.x - 6, top: c.y - 6, cursor: handleCursor(c.id) }}
-            onPointerDown={(e) => beginDrag(e, 'scale')}
+            onPointerDown={(e) => beginDrag(e, 'scale', visualClip)}
             onPointerMove={moveDrag}
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
@@ -605,6 +835,121 @@ export default function PreviewPanel() {
   }, [cropMode, setCropMode]);
 
   // -------------------------------------------------------------
+  // Text overlay (kind === 'text'): positioned by the same canvas
+  // transform, draggable/resizable, double-click to edit inline.
+  // -------------------------------------------------------------
+  const textLayerRef = useRef<HTMLDivElement>(null);
+  const [editingTextId, setEditingTextId] = useState<string | null>(null);
+  const [editText, setEditText] = useState('');
+  const [hoverTN, setHoverTN] = useState(0);
+  const [textRect, setTextRect] = useState({ x: 0, y: 0, w: 0, h: 0 });
+
+  const showTextLayer = previewMode === 'timeline' && !!textClip && !cropMode;
+  const textT: LiveTransform | { scale: number; posX: number; posY: number } =
+    liveT && textClip && liveT.id === textClip.id
+      ? liveT
+      : textClip
+        ? clipTransform(textClip)
+        : { scale: 1, posX: 0, posY: 0 };
+  const textFontPx = boxH > 0 ? Math.max(8, ((textClip?.fontSize || 72) * boxH) / 1080) : 16;
+  const isTextSelected = !!textClip && selectedClipId === textClip.id;
+  const showTextChrome =
+    !!showTextLayer &&
+    !!textClip &&
+    (hoverTN > 0 || isTextSelected || liveT?.id === textClip.id || editingTextId === textClip.id);
+
+  // Measure the laid-out text box for handle placement. Deps exclude the
+  // playhead so this never runs on playback ticks.
+  useLayoutEffect(() => {
+    if (!showTextChrome) return;
+    const box = boxRef.current?.getBoundingClientRect();
+    const el = textLayerRef.current;
+    if (!box || !el) return;
+    const r = el.getBoundingClientRect();
+    const next = { x: r.left - box.left, y: r.top - box.top, w: r.width, h: r.height };
+    setTextRect((prev) =>
+      Math.abs(prev.x - next.x) > 0.5 ||
+      Math.abs(prev.y - next.y) > 0.5 ||
+      Math.abs(prev.w - next.w) > 0.5 ||
+      Math.abs(prev.h - next.h) > 0.5
+        ? next
+        : prev,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    showTextChrome,
+    textClip?.id,
+    textClip?.text,
+    textClip?.fontSize,
+    textClip?.fontFamily,
+    textClip?.bold,
+    textClip?.textAlign,
+    textClip?.textColor,
+    textClip?.textBg,
+    textClip?.scale,
+    textClip?.posX,
+    textClip?.posY,
+    boxW,
+    boxH,
+    liveT,
+    editingTextId,
+  ]);
+
+  const textPointerHandlers = {
+    onPointerDown: (e: React.PointerEvent) => beginDrag(e, 'move', textClip),
+    onPointerMove: moveDrag,
+    onPointerUp: endDrag,
+    onPointerCancel: endDrag,
+    onPointerEnter: () => setHoverTN((n) => n + 1),
+    onPointerLeave: () => setHoverTN((n) => Math.max(0, n - 1)),
+    onDoubleClick: (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (textClip && editingTextId !== textClip.id) {
+        setEditingTextId(textClip.id);
+        setEditText(textClip.text ?? '');
+      }
+    },
+  };
+
+  const commitTextEdit = (save: boolean) => {
+    const id = editingTextId;
+    setEditingTextId(null);
+    if (!save || !id || !project) return;
+    const cur = findClipInProject(project, id);
+    const v = editText;
+    if (cur && v.trim().length > 0 && v !== (cur.text ?? '')) {
+      op({ op: 'clip:setProps', clipId: id, text: v, name: v.slice(0, 40) });
+    }
+  };
+
+  const renderTextHandles = () => {
+    if (!showTextChrome || !textClip || boxW <= 0 || textRect.w <= 0) return null;
+    const corners: { id: 'nw' | 'ne' | 'sw' | 'se'; x: number; y: number }[] = [
+      { id: 'nw', x: textRect.x, y: textRect.y },
+      { id: 'ne', x: textRect.x + textRect.w, y: textRect.y },
+      { id: 'sw', x: textRect.x, y: textRect.y + textRect.h },
+      { id: 'se', x: textRect.x + textRect.w, y: textRect.y + textRect.h },
+    ];
+    return (
+      <>
+        {corners.map((c) => (
+          <div
+            key={c.id}
+            className="canvas-handle"
+            style={{ left: c.x - 6, top: c.y - 6, cursor: handleCursor(c.id) }}
+            onPointerDown={(e) => beginDrag(e, 'scale', textClip)}
+            onPointerMove={moveDrag}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+            onPointerEnter={() => setHoverTN((n) => n + 1)}
+            onPointerLeave={() => setHoverTN((n) => Math.max(0, n - 1))}
+          />
+        ))}
+      </>
+    );
+  };
+
+  // -------------------------------------------------------------
   // 1) Timeline playback: wall-clock drives the playhead, media slaves to it.
   //    Effect depends only on [playing, previewMode] so crossing clip
   //    boundaries never tears down the RAF loop (the old freeze).
@@ -613,11 +958,13 @@ export default function PreviewPanel() {
     if (previewMode !== 'timeline') {
       timelineVideoRef.current?.pause();
       timelineAudioRef.current?.pause();
+      pauseExtraLayers();
       return;
     }
     if (!playing) {
       timelineVideoRef.current?.pause();
       timelineAudioRef.current?.pause();
+      pauseExtraLayers();
       return;
     }
 
@@ -681,6 +1028,9 @@ export default function PreviewPanel() {
         }
       }
 
+      // Overlay videos + extra audio tracks follow along (best-effort).
+      syncExtraLayers(head, proj, false, vc?.id, ac?.id);
+
       if (holdForSeek) {
         if (seekHoldStart.current == null) seekHoldStart.current = now;
         if (now - seekHoldStart.current < 1000) {
@@ -733,6 +1083,7 @@ export default function PreviewPanel() {
         a.pause();
       }
     }
+    syncExtraLayers(playhead, project, true, visualClip?.id, activeAudioClip?.id);
   }, [previewMode, playing, playhead, project, visualClip, visualMedia, activeAudioClip, activeAudioMedia]);
 
   // -------------------------------------------------------------
@@ -887,7 +1238,7 @@ export default function PreviewPanel() {
   };
 
   const layerPointerHandlers = {
-    onPointerDown: (e: React.PointerEvent) => beginDrag(e, 'move'),
+    onPointerDown: (e: React.PointerEvent) => beginDrag(e, 'move', visualClip),
     onPointerMove: moveDrag,
     onPointerUp: endDrag,
     onPointerCancel: endDrag,
@@ -971,9 +1322,12 @@ export default function PreviewPanel() {
                 if (e.target === e.currentTarget) select(null);
               }}
             >
+              {/* Lower timeline layers render under the main clip. */}
+              {extraLayers.below.map(renderStackLayer)}
+
               {/* Transformable video layer (always mounted so the ref stays valid). */}
               <div className="canvas-layer" style={layerStyle} {...layerPointerHandlers}>
-                <div className="canvas-inner" style={innerStyle}>
+                <div className="canvas-inner" style={innerWithFilter}>
                   <video
                     ref={timelineVideoRef}
                     playsInline
@@ -990,14 +1344,75 @@ export default function PreviewPanel() {
               {/* Transformable image layer. */}
               {visualMedia?.kind === 'image' && visualClip && (
                 <div className="canvas-layer" style={layerStyle} {...layerPointerHandlers}>
-                  <div className="canvas-inner" style={innerStyle}>
+                  <div className="canvas-inner" style={innerWithFilter}>
                     <img src={window.taxicut.mediaUrl(visualMedia.path)} alt="" draggable={false} />
                   </div>
                 </div>
               )}
 
+              {/* Upper timeline layers render over the main clip. */}
+              {extraLayers.above.map(renderStackLayer)}
+
               {renderHandles()}
               {renderCropOverlay()}
+
+              {/* Text overlay layer (drag/resize like video, double-click to edit). */}
+              {showTextLayer && textClip && (
+                <div
+                  ref={textLayerRef}
+                  className="canvas-text"
+                  style={{
+                    left: boxW / 2,
+                    top: boxH / 2,
+                    width: 'max-content',
+                    maxWidth: boxW,
+                    transform: `translate(${textT.posX * boxW}px, ${textT.posY * boxH}px) scale(${textT.scale}) translate(-50%, -50%)`,
+                    fontFamily: textClip.fontFamily || 'Arial',
+                    fontSize: textFontPx,
+                    fontWeight: textClip.bold ? 700 : 400,
+                    color: textClip.textColor || '#ffffff',
+                    background: textClip.textBg || 'transparent',
+                    textAlign: textClip.textAlign || 'center',
+                  }}
+                  {...textPointerHandlers}
+                >
+                  {editingTextId === textClip.id ? (
+                    <textarea
+                      className="canvas-text-edit"
+                      value={editText}
+                      rows={3}
+                      onChange={(e) => setEditText(e.target.value)}
+                      onBlur={() => commitTextEdit(true)}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.stopPropagation();
+                          commitTextEdit(false);
+                        } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                          commitTextEdit(true);
+                        } else {
+                          e.stopPropagation();
+                        }
+                      }}
+                      ref={(el) => {
+                        el?.focus();
+                        el?.select();
+                      }}
+                      style={{
+                        fontFamily: 'inherit',
+                        fontSize: 'inherit',
+                        fontWeight: 'inherit',
+                        color: 'inherit',
+                        textAlign: 'inherit',
+                      }}
+                    />
+                  ) : (
+                    textClip.text
+                  )}
+                </div>
+              )}
+              {renderTextHandles()}
 
               {/* Timeline audio-only indicator (no video clip under playhead but audio is present). */}
               {!visualClip && (activeAudioMedia || visualMedia?.kind === 'audio') && (
@@ -1096,6 +1511,10 @@ export default function PreviewPanel() {
             onError={onMediaError}
             style={{ display: 'none' }}
           />
+          {/* One mixer element per audio track (2nd+ tracks join the mix). */}
+          {tracks.filter((t) => t.kind === 'audio').map((t) => (
+            <audio key={t.id} ref={setLayerAudioRef(t.id)} preload="auto" style={{ display: 'none' }} />
+          ))}
           <audio
             ref={sourceAudioRef}
             preload="auto"

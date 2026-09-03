@@ -11,6 +11,10 @@
   --danger: #ff4d5e;
   --video-clip: #6b4fd8;
   --audio-clip: #2e7d4f;
+  --image-clip: #c07f1e;
+  --image-clip-2: #7a4d12;
+  --text-clip: #8b4fd8;
+  --text-clip-2: #5b2ea6;
   --playhead: #ff3b46;
   --snap: #00e5ff;
   font-size: 13px;
@@ -45,7 +49,7 @@ button.accent { background: var(--accent); border-color: var(--accent-dim); }
 button:disabled { opacity: 0.4; cursor: default; }
 button.icon { padding: 4px 7px; }
 
-input[type='text'], input[type='number'] {
+input[type='text'], input[type='number'], textarea, select {
   background: var(--bg0);
   color: var(--text);
   border: 1px solid var(--border);
@@ -54,7 +58,7 @@ input[type='text'], input[type='number'] {
   font: inherit;
   outline: none;
 }
-input:focus { border-color: var(--accent); }
+input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 
 .app {
   display: flex;
@@ -235,6 +239,62 @@ input:focus { border-color: var(--accent); }
   display: block;
   pointer-events: none;
 }
+/* Text overlay layer: shrink-wrapped, center-anchored, draggable. */
+.canvas-text {
+  position: absolute;
+  user-select: none;
+  line-height: 1.2;
+  padding: 0.15em 0.3em;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  z-index: 3;
+}
+.canvas-text-edit {
+  width: 100%;
+  min-width: 120px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  outline: none;
+  resize: both;
+  line-height: 1.2;
+  padding: 0.15em 0.3em;
+  user-select: text;
+}
+/* Template + filter preset pickers. */
+.tpl-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.tpl-btn {
+  padding: 8px 4px;
+  border-radius: 6px;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.tpl-btn small {
+  display: block;
+  font-size: 9px;
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-family: inherit;
+}
+.filter-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.filter-btn { font-size: 11px; padding: 4px 9px; }
+.filter-btn.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
 .canvas-handle {
   position: absolute;
   width: 12px;
@@ -400,7 +460,7 @@ input:focus { border-color: var(--accent); }
 }
 .timeline-toolbar .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .timeline-body { flex: 1; display: flex; min-height: 0; }
-.track-headers { width: 96px; flex: none; border-right: 1px solid var(--border); overflow: hidden; }
+.track-headers { width: 132px; flex: none; border-right: 1px solid var(--border); overflow: hidden; }
 .track-header {
   height: 48px;
   display: flex;
@@ -440,7 +500,40 @@ input:focus { border-color: var(--accent); }
 }
 .clip.video { background: linear-gradient(180deg, var(--video-clip), #5237b8); }
 .clip.audio { background: linear-gradient(180deg, var(--audio-clip), #1f5c39); }
+.clip.image { background: linear-gradient(180deg, var(--image-clip), var(--image-clip-2)); }
+.clip.text { background: linear-gradient(180deg, var(--text-clip), var(--text-clip-2)); }
 .clip.selected { outline: 2px solid #fff; z-index: 2; }
+/* Legacy same-track overlaps (new clips auto-layer instead): red flag. */
+.clip.overlap { outline: 2px dashed var(--danger); outline-offset: -2px; }
+.track-lane.video { background: rgba(107, 79, 216, 0.06); }
+.track-lane.audio { background: rgba(46, 125, 79, 0.07); }
+/* Kind chip in the track header: V1/V2… video, A1/A2… audio. */
+.track-kind-chip {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+.track-kind-chip.video { background: rgba(107, 79, 216, 0.25); color: #c9bfff; }
+.track-kind-chip.audio { background: rgba(46, 125, 79, 0.3); color: #a9e5c3; }
+.track-header .track-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* "Will create layer" hint shown when the drop target range is occupied. */
+.layer-will-create {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--accent);
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px dashed var(--accent);
+  border-radius: 4px;
+  padding: 0 5px;
+  pointer-events: none;
+  z-index: 4;
+}
 .clip .handle { position: absolute; top: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 3; }
 .clip .handle.l { left: 0; }
 .clip .handle.r { right: 0; }
@@ -645,6 +738,17 @@ input:focus { border-color: var(--accent); }
 /* Media card enhancements */
 .media-card { position: relative; }
 .media-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.media-card.checked { border-color: var(--accent); }
+.media-check {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 3;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
 .media-actions {
   position: absolute;
   top: 4px;
