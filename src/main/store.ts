@@ -134,6 +134,18 @@ export class ProjectStore {
     return asset;
   }
 
+  deleteMedia(mediaId: string): OpResult<{ removed: string }> {
+    const idx = this.project.media.findIndex((m) => m.id === mediaId);
+    if (idx === -1) return { ok: false, error: `Unknown media ${mediaId}` };
+    this.snapshot();
+    this.project.media.splice(idx, 1);
+    for (const track of this.project.tracks) {
+      track.clips = track.clips.filter((c) => c.mediaId !== mediaId);
+    }
+    this.touch();
+    return { ok: true, data: { removed: mediaId } };
+  }
+
   // ---------- timeline mutations ----------
   addClip(input: {
     mediaId: string;
@@ -154,8 +166,9 @@ export class ProjectStore {
     if (media.kind !== 'image' && inSec >= media.durationSec)
       return { ok: false, error: 'inSec beyond media duration' };
     const sourceAvail =
-      media.kind === 'image' ? Number.POSITIVE_INFINITY : media.durationSec - inSec;
-    const durationSec = Math.max(0.1, Math.min(input.durationSec ?? sourceAvail, sourceAvail));
+      media.kind === 'image' ? 5.0 : media.durationSec - inSec;
+    const defaultDur = media.kind === 'image' ? 5.0 : sourceAvail;
+    const durationSec = Math.max(0.1, Math.min(input.durationSec ?? defaultDur, media.kind === 'image' ? 3600 : sourceAvail));
     const trackEnd = track.clips.reduce((e, c) => Math.max(e, c.startSec + c.durationSec), 0);
     const startSec = Math.max(0, input.startSec ?? trackEnd);
     const clip: Clip = {
@@ -185,11 +198,14 @@ export class ProjectStore {
       ? this.project.tracks.find((t) => t.id === trackId)
       : found.track;
     if (!targetTrack) return { ok: false, error: `Unknown track ${trackId}` };
+    if (targetTrack.kind !== found.track.kind) {
+      return { ok: false, error: `Cannot move clip between ${found.track.kind} and ${targetTrack.kind} tracks` };
+    }
     this.snapshot();
     if (trackId && targetTrack.id !== found.track.id) {
       found.track.clips.splice(found.index, 1);
       targetTrack.clips.push(found.clip);
-      trackId && (found.track = targetTrack);
+      found.track = targetTrack;
     }
     if (startSec !== undefined) found.clip.startSec = Math.max(0, startSec);
     targetTrack.clips.sort((a, b) => a.startSec - b.startSec);
@@ -291,11 +307,32 @@ export class ProjectStore {
     return { ok: true, data: track };
   }
 
+  deleteTrack(trackId: string): OpResult<{ removed: string }> {
+    if (this.project.tracks.length <= 1) {
+      return { ok: false, error: 'Cannot delete the only track' };
+    }
+    const idx = this.project.tracks.findIndex((t) => t.id === trackId);
+    if (idx === -1) return { ok: false, error: `Unknown track ${trackId}` };
+    this.snapshot();
+    this.project.tracks.splice(idx, 1);
+    this.touch();
+    return { ok: true, data: { removed: trackId } };
+  }
+
   setTrackMute(trackId: string, muted: boolean): OpResult {
     const track = this.project.tracks.find((t) => t.id === trackId);
     if (!track) return { ok: false, error: `Unknown track ${trackId}` };
     this.snapshot();
     track.muted = muted;
+    this.touch();
+    return { ok: true };
+  }
+
+  setTrackLock(trackId: string, locked: boolean): OpResult {
+    const track = this.project.tracks.find((t) => t.id === trackId);
+    if (!track) return { ok: false, error: `Unknown track ${trackId}` };
+    this.snapshot();
+    track.locked = locked;
     this.touch();
     return { ok: true };
   }
@@ -333,6 +370,8 @@ export class ProjectStore {
           return op.path ? this.open(op.path) : { ok: false, error: 'path required' };
         case 'project:save':
           return this.save(op.path);
+        case 'media:delete':
+          return this.deleteMedia(op.mediaId);
         case 'timeline:addClip':
           return this.addClip(op);
         case 'timeline:moveClip':
@@ -347,8 +386,12 @@ export class ProjectStore {
           return this.setClipProps(op.clipId, op);
         case 'track:add':
           return this.addTrack(op.kind);
+        case 'track:delete':
+          return this.deleteTrack(op.trackId);
         case 'track:setMute':
           return this.setTrackMute(op.trackId, op.muted);
+        case 'track:setLock':
+          return this.setTrackLock(op.trackId, op.locked);
         case 'history:undo':
           return this.undo();
         case 'history:redo':
