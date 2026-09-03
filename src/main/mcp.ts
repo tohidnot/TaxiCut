@@ -131,13 +131,26 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
     });
 
   server.tool('add_clip',
-    'Append (or place) a media item on the timeline. Defaults to the end of the first matching-kind track.',
+    'Append (or place) a media item on the timeline. Defaults to the end of the first matching-kind track. Use mediaId "text" for a standalone text overlay (then text/template apply).',
     {
       mediaId: z.string(), trackId: z.string().optional(), startSec: z.number().min(0).optional(),
       inSec: z.number().min(0).optional(), durationSec: z.number().positive().optional(),
+      text: z.string().optional(), template: z.string().optional(),
     },
     async (args) => {
       const r = await store.dispatch({ op: 'timeline:addClip', ...args });
+      return r.ok ? ok(r.data) : fail(r.error!);
+    });
+
+  server.tool('add_text',
+    'Add a styled text overlay clip (title, subtitle, caption…). Templates: title, subtitle, caption, lower, pop, quote.',
+    {
+      text: z.string().optional(), template: z.string().optional(),
+      trackId: z.string().optional(), startSec: z.number().min(0).optional(),
+      durationSec: z.number().positive().optional(),
+    },
+    async (args) => {
+      const r = await store.dispatch({ op: 'timeline:addClip', mediaId: 'text', ...args });
       return r.ok ? ok(r.data) : fail(r.error!);
     });
 
@@ -170,7 +183,7 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
       return r.ok ? ok(r.data) : fail(r.error!);
     });
 
-  server.tool('set_clip_properties', 'Set clip audio/playback/transform/crop properties.',
+  server.tool('set_clip_properties', 'Set clip audio/playback/transform/crop/filter/text properties.',
     {
       clipId: z.string(),
       volumeDb: z.number().min(-60).max(12).optional(),
@@ -184,6 +197,14 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
       cropT: z.number().min(0).max(0.9).optional(),
       cropR: z.number().min(0).max(0.9).optional(),
       cropB: z.number().min(0).max(0.9).optional(),
+      filter: z.string().optional(),
+      text: z.string().optional(),
+      fontFamily: z.string().optional(),
+      fontSize: z.number().min(8).max(500).optional(),
+      textColor: z.string().optional(),
+      textBg: z.string().optional(),
+      bold: z.boolean().optional(),
+      textAlign: z.enum(['left', 'center', 'right']).optional(),
     },
     async ({ clipId, ...props }) => {
       const r = await store.dispatch({ op: 'clip:setProps', clipId, ...props });

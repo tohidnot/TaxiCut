@@ -2,10 +2,11 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join, basename } from 'node:path';
 import { promisify } from 'node:util';
 import type { Clip, MediaAsset, Project, Track } from '../shared/types';
+import { clipFilterById } from '../shared/types';
 
 const run = promisify(execFile);
 
@@ -121,6 +122,7 @@ export function clipVideoFilter(
   const cb = Number.isFinite(clip.cropB) ? clip.cropB : 0;
   let mw = media && media.width > 0 ? media.width : 0;
   let mh = media && media.height > 0 ? media.height : 0;
+  const filt = clipFilterById(clip.filter).ff;
   const parts: string[] = [];
   if ((cl > 0 || ct > 0 || cr > 0 || cb > 0) && mw > 0 && mh > 0 && cl + cr < 1 && ct + cb < 1) {
     const cwS = evenDown(mw * (1 - cl - cr), mw);
@@ -132,10 +134,11 @@ export function clipVideoFilter(
     mh = chS;
   }
   if ((Math.abs(s - 1) < 1e-6 && ox === 0 && oy === 0) || mw === 0 || mh === 0) {
-    if (parts.length === 0) {
+    if (parts.length === 0 && !filt) {
       return `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,${tail}`;
     }
     parts.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black`);
+    if (filt) parts.push(filt);
     parts.push(tail);
     return parts.join(',');
   }
@@ -157,8 +160,167 @@ export function clipVideoFilter(
     const py = clampInt((H - ch) / 2 + oy * H, 0, H - ch);
     parts.push(`pad=${W}:${H}:${px}:${py}:black`);
   }
+  if (filt) parts.push(filt);
   parts.push(tail);
   return parts.join(',');
+}
+
+/** #rrggbb/#rgb -> [r, g, b] for the PNG renderer (null when not hex). */
+function hexRgb(color: string): [number, number, number] | null {
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec((color || '').trim());
+  if (!m) return null;
+  let h = m[1];
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+const FONT_DIRS: string[] =
+  process.platform === 'darwin'
+    ? ['/System/Library/Fonts/Supplemental', '/System/Library/Fonts', '/Library/Fonts', join(homedir(), 'Library/Fonts')]
+    : process.platform === 'win32'
+      ? ['C:\\Windows\\Fonts']
+      : ['/usr/share/fonts/truetype/dejavu', '/usr/share/fonts/truetype/liberation', '/usr/share/fonts', '/usr/local/share/fonts'];
+
+const FONT_TABLE: Record<string, { n: string[]; b: string[] }> = {
+  arial: { n: ['Arial.ttf'], b: ['Arial Bold.ttf'] },
+  helvetica: { n: ['Helvetica.ttc'], b: ['Helvetica.ttc'] },
+  times: { n: ['Times New Roman.ttf'], b: ['Times New Roman Bold.ttf'] },
+  'times new roman': { n: ['Times New Roman.ttf'], b: ['Times New Roman Bold.ttf'] },
+  courier: { n: ['Courier New.ttf'], b: ['Courier New Bold.ttf'] },
+  'courier new': { n: ['Courier New.ttf'], b: ['Courier New Bold.ttf'] },
+  georgia: { n: ['Georgia.ttf'], b: ['Georgia Bold.ttf'] },
+  verdana: { n: ['Verdana.ttf'], b: ['Verdana Bold.ttf'] },
+  impact: { n: ['Impact.ttf'], b: ['Impact.ttf'] },
+};
+
+function fontCandidates(family: string, bold: boolean): string[] {
+  const e = FONT_TABLE[(family || '').toLowerCase()] ?? FONT_TABLE['arial'];
+  const base = [...(bold ? e.b : e.n), ...e.n];
+  const lower = base.map((s) => s.toLowerCase());
+  return [...new Set([...base, ...lower, 'DejaVuSans.ttf', 'Arial.ttf', 'arial.ttf', 'Helvetica.ttc'])];
+}
+
+/** System font file for drawtext, or null when nothing usable is found. */
+export function resolveFontfile(family: string, bold: boolean): string | null {
+  for (const dir of FONT_DIRS) {
+    for (const f of fontCandidates(family, bold)) {
+      const p = join(dir, f);
+      try {
+        if (existsSync(p)) return p;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return null;
+}
+
+const PYTHON = process.env.TAXICUT_PYTHON ?? 'python3';
+
+/**
+ * Renders text with Pillow (transparent PNG). Args: fontfile fontsize color
+ * bgcolor align pad outPng base64Text. Prints "W H" of the rendered image.
+ */
+const TEXT_PNG_SCRIPT = `
+import sys, base64
+from PIL import Image, ImageDraw, ImageFont
+fontfile, fontsize, color, bgcolor, align, pad, out, b64 = sys.argv[1:9]
+text = base64.b64decode(b64).decode('utf-8')
+fontsize = int(fontsize); pad = int(pad)
+def hexrgb(s):
+    s = s.strip().lstrip('#')
+    if len(s) == 3: s = ''.join(c * 2 for c in s)
+    return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+try:
+    font = ImageFont.truetype(fontfile, fontsize)
+except Exception:
+    font = ImageFont.load_default()
+ascent, descent = font.getmetrics()
+line_h = ascent + descent
+spacing = int(fontsize * 0.2)
+lines = text.split('\\n')
+widths = []
+for ln in lines:
+    bb = font.getbbox(ln if ln else ' ')
+    widths.append(max(0, bb[2] - bb[0]))
+bw = max(widths) if widths else 1
+bh = line_h * len(lines) + spacing * (len(lines) - 1)
+W, H = max(1, bw + pad * 2), max(1, bh + pad * 2)
+img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+d = ImageDraw.Draw(img)
+if bgcolor:
+    d.rectangle([0, 0, W - 1, H - 1], fill=hexrgb(bgcolor) + (255,))
+fg = hexrgb(color) + (255,)
+y = pad
+for ln in lines:
+    if align == 'left':
+        x, anc = pad, 'la'
+    elif align == 'right':
+        x, anc = W - pad, 'ra'
+    else:
+        x, anc = W // 2, 'ma'
+    d.text((x, y), ln, font=font, fill=fg, anchor=anc)
+    y += line_h + spacing
+img.save(out)
+print(f'{W} {H}')
+`;
+
+export interface TextOverlayJob {
+  clip: Clip;
+  png: string;
+  x: number;
+  y: number;
+}
+
+/** Render each text clip to a transparent PNG; returns overlay jobs (skips failures). */
+export async function renderTextOverlays(
+  clips: Clip[],
+  W: number,
+  H: number,
+  dir: string,
+): Promise<TextOverlayJob[]> {
+  const jobs: TextOverlayJob[] = [];
+  let warned = false;
+  const warnOnce = (): void => {
+    if (!warned) {
+      warned = true;
+      console.warn('text overlay rendering unavailable (need python3 + Pillow); skipping text');
+    }
+  };
+  let i = 0;
+  for (const clip of clips) {
+    const raw = (clip.text ?? '').trim();
+    if (!raw) continue;
+    try {
+      const fontfile = resolveFontfile(clip.fontFamily || 'Arial', !!clip.bold);
+      if (!fontfile) continue;
+      const s = Number.isFinite(clip.scale) && clip.scale > 0 ? clip.scale : 1;
+      const fs = Math.max(8, Math.round((clip.fontSize || 72) * (H / 1080) * s));
+      const color = hexRgb(clip.textColor || '#ffffff') ? (clip.textColor as string) : '#ffffff';
+      const bg = hexRgb(clip.textBg || '') ? (clip.textBg as string) : '';
+      const pad = bg ? Math.max(2, Math.round(fs / 5)) : 0;
+      const out = join(dir, `text-${i++}.png`);
+      const { stdout } = await run(PYTHON, [
+        '-c', TEXT_PNG_SCRIPT,
+        fontfile, String(fs), color, bg, clip.textAlign || 'center',
+        String(pad), out, Buffer.from(raw, 'utf8').toString('base64'),
+      ]);
+      const m = /(\d+)\s+(\d+)/.exec(stdout);
+      if (!m) continue;
+      const w = parseInt(m[1], 10);
+      const h = parseInt(m[2], 10);
+      if (!(w > 0 && h > 0)) continue;
+      jobs.push({
+        clip,
+        png: out,
+        x: Math.round(W / 2 + (clip.posX || 0) * W - w / 2),
+        y: Math.round(H / 2 + (clip.posY || 0) * H - h / 2),
+      });
+    } catch {
+      warnOnce();
+    }
+  }
+  return jobs;
 }
 
 function srtTime(sec: number): string {
@@ -187,8 +349,14 @@ export async function exportProject(
     .filter((t) => t.kind === 'audio' && !t.muted)
     .flatMap((t) => t.clips)
     .sort((a, b) => a.startSec - b.startSec);
+  // Text overlays from any unmuted video track (burned onto the picture).
+  const textClips = project.tracks
+    .filter((t) => t.kind === 'video' && !t.muted)
+    .flatMap((t) => t.clips)
+    .filter((c) => c.kind === 'text' && (c.text ?? '').trim().length > 0)
+    .sort((a, b) => a.startSec - b.startSec);
 
-  if (mainVideoClips.length === 0 && audioClips.length === 0)
+  if (mainVideoClips.length === 0 && audioClips.length === 0 && textClips.length === 0)
     throw new Error('Timeline is empty — nothing to export');
 
   const dir = await mkdtemp(join(tmpdir(), 'taxicut-export-'));
@@ -211,9 +379,13 @@ export async function exportProject(
       segments.push(seg);
     };
 
-    if (mainVideoClips.length === 0 && audioClips.length > 0) {
-      // Audio-only: generate black background matching audio duration
-      const totalDur = audioClips.reduce((max, c) => Math.max(max, c.startSec + c.durationSec), 0);
+    if (mainVideoClips.length === 0 && (audioClips.length > 0 || textClips.length > 0)) {
+      // Audio-only (or text-only): generate black background matching content duration
+      const totalDur = Math.max(
+        0,
+        ...audioClips.map((c) => c.startSec + c.durationSec),
+        ...textClips.map((c) => c.startSec + c.durationSec),
+      );
       await renderBlack(Math.max(1, totalDur));
     } else {
       // 1) render each video clip to a uniform intermediate, filling gaps with black
@@ -225,7 +397,7 @@ export async function exportProject(
         }
 
         const media = mediaById.get(clip.mediaId);
-        if (!media) throw new Error(`Missing media for clip ${clip.name}`);
+        if (!media && clip.kind !== 'text') throw new Error(`Missing media for clip ${clip.name}`);
         const seg = join(dir, `seg-${String(segIndex++).padStart(4, '0')}.mp4`);
         const dur = clip.durationSec;
         const audioFilter =
@@ -274,9 +446,34 @@ export async function exportProject(
     await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error',
       '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', concatOut]);
 
+    // 2b) burn text overlays onto the picture (before the audio mix)
+    let pictureSrc = concatOut;
+    const textJobs = await renderTextOverlays(textClips, W, H, dir);
+    if (textJobs.length > 0) {
+      const textOut = audioClips.length > 0 ? join(dir, 'text.mp4') : outPath;
+      const inputs: string[] = ['-i', concatOut];
+      const parts: string[] = [];
+      let label = '0:v';
+      textJobs.forEach((j, i) => {
+        const end = j.clip.startSec + j.clip.durationSec;
+        inputs.push('-framerate', String(FPS), '-loop', '1', '-t', end.toFixed(3), '-i', j.png);
+        const out = i === textJobs.length - 1 ? 'vout' : `v${i + 1}`;
+        parts.push(
+          `[${label}][${i + 1}:v]overlay=${j.x}:${j.y}` +
+          `:enable='between(t,${j.clip.startSec.toFixed(3)},${end.toFixed(3)})'[${out}]`,
+        );
+        label = out;
+      });
+      await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', ...inputs,
+        '-filter_complex', parts.join(';'), '-map', '[vout]', '-map', '0:a',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(opts.crf ?? 18),
+        '-c:a', 'aac', '-ar', '48000', '-ac', '2', textOut]);
+      pictureSrc = textOut;
+    }
+
     // 3) mix standalone audio clips (from audio tracks) over the concat result
     if (audioClips.length > 0) {
-      const inputs: string[] = ['-i', concatOut];
+      const inputs: string[] = ['-i', pictureSrc];
       const filters: string[] = [];
       const mixLabels: string[] = ['[0:a]'];
       audioClips.forEach((clip, i) => {
@@ -296,17 +493,18 @@ export async function exportProject(
           '-filter_complex', filters.join(';'), '-map', '0:v', '-map', '[aout]',
           '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', outPath]);
       } else {
-        await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', '-i', concatOut, '-c', 'copy', outPath]);
+        await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', '-i', pictureSrc, '-c', 'copy', outPath]);
       }
-    } else {
-      await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', '-i', concatOut, '-c', 'copy', outPath]);
+    } else if (pictureSrc !== outPath) {
+      await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', '-i', pictureSrc, '-c', 'copy', outPath]);
     }
+    // else: text was already burned straight to outPath — nothing left to do.
 
-    // 4) Write sidecar SRT if subtitle clips are present
+    // 4) Write sidecar SRT for transcription subtitle clips (titles excluded)
     const subtitleClips = project.tracks
       .filter((t) => !t.muted)
       .flatMap((t) => t.clips)
-      .filter((c) => Boolean(c.text))
+      .filter((c) => c.kind !== 'text' && Boolean(c.text))
       .sort((a, b) => a.startSec - b.startSec);
     if (subtitleClips.length > 0) {
       const srtPath = outPath.replace(/\.[^.]+$/, '') + '.srt';

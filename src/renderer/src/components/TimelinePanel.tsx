@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { useEditor, op } from '../store';
 import { formatTimecode } from '../time';
-import type { Clip, Track } from '../../../shared/types';
+import type { Clip, MediaKind, Track } from '../../../shared/types';
 import {
   IconUndo,
   IconRedo,
@@ -250,7 +250,7 @@ export default function TimelinePanel() {
   };
 
   // Helper to resolve the best track for any imported media item
-  const findOrCreateTrack = async (mediaKind: 'video' | 'audio' | 'image', preferredTrack?: Track): Promise<string> => {
+  const findOrCreateTrack = async (mediaKind: MediaKind, preferredTrack?: Track): Promise<string> => {
     const kind = mediaKind === 'audio' ? 'audio' : 'video';
     if (preferredTrack && preferredTrack.kind === kind && !preferredTrack.locked) {
       return preferredTrack.id;
@@ -386,6 +386,18 @@ export default function TimelinePanel() {
           style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
         >
           <IconPlus size={11} /> <IconAudio size={12} /> Audio
+        </button>
+        <button
+          className="icon"
+          onClick={async () => {
+            const r = await op({ op: 'timeline:addClip', mediaId: 'text', startSec: playhead });
+            if (r.ok && r.data) select((r.data as Clip).id);
+            else if (!r.ok) alert(r.error);
+          }}
+          title="Add text overlay at playhead"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
+        >
+          <IconPlus size={11} /> <IconSubtitles size={12} /> Text
         </button>
         <div className="right">
           <button className="icon" onClick={() => setZoom(Math.max(10, pxPerSec - 15))} title="Zoom out">
@@ -546,7 +558,7 @@ export default function TimelinePanel() {
                       return (
                         <div
                           key={c.id}
-                          className={`clip ${t.kind} ${c.id === selectedId ? 'selected' : ''}`}
+                          className={`clip ${t.kind} ${c.kind === 'text' ? 'text' : ''} ${c.id === selectedId ? 'selected' : ''}`}
                           style={{
                             left: liveStart * pxPerSec,
                             width: clipWidth,

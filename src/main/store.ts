@@ -12,6 +12,7 @@ import type {
   Track,
   TrackKind,
 } from '../shared/types';
+import { CLIP_FILTERS, textTemplateById } from '../shared/types';
 
 export interface StoreListener {
   (project: Project, filePath: string | null): void;
@@ -36,6 +37,16 @@ function migrateProject(p: Project): void {
       }
       if (c.cropL + c.cropR >= 1) { c.cropL = 0; c.cropR = 0; }
       if (c.cropT + c.cropB >= 1) { c.cropT = 0; c.cropB = 0; }
+      if (typeof c.filter !== 'string') c.filter = '';
+      if (c.kind === 'text') {
+        if (typeof c.text !== 'string') c.text = 'Text';
+        if (typeof c.fontFamily !== 'string' || !c.fontFamily) c.fontFamily = 'Arial';
+        if (!Number.isFinite(c.fontSize) || c.fontSize < 8) c.fontSize = 72;
+        if (typeof c.textColor !== 'string' || !c.textColor) c.textColor = '#ffffff';
+        if (typeof c.textBg !== 'string') c.textBg = '';
+        if (typeof c.bold !== 'boolean') c.bold = false;
+        if (c.textAlign !== 'left' && c.textAlign !== 'center' && c.textAlign !== 'right') c.textAlign = 'center';
+      }
     }
   }
 }
@@ -178,7 +189,10 @@ export class ProjectStore {
     startSec?: number;
     inSec?: number;
     durationSec?: number;
+    text?: string;
+    template?: string;
   }): OpResult<Clip> {
+    if (input.mediaId === 'text') return this.addTextClip(input);
     const media = this.media(input.mediaId);
     if (!media) return { ok: false, error: `Unknown media ${input.mediaId}` };
     const wantKind: TrackKind = media.kind === 'audio' ? 'audio' : 'video';
@@ -215,6 +229,66 @@ export class ProjectStore {
       cropT: 0,
       cropR: 0,
       cropB: 0,
+      filter: '',
+      fontFamily: 'Arial',
+      fontSize: 72,
+      textColor: '#ffffff',
+      textBg: '',
+      bold: false,
+      textAlign: 'center',
+    };
+    this.snapshot();
+    track.clips.push(clip);
+    track.clips.sort((a, b) => a.startSec - b.startSec);
+    this.touch();
+    return { ok: true, data: clip };
+  }
+
+  /** Standalone text overlay clip (no media). Lives on a video track. */
+  addTextClip(input: {
+    trackId?: string;
+    startSec?: number;
+    durationSec?: number;
+    text?: string;
+    template?: string;
+  }): OpResult<Clip> {
+    const track = input.trackId
+      ? this.project.tracks.find((t) => t.id === input.trackId)
+      : this.project.tracks.find((t) => t.kind === 'video');
+    if (!track || track.kind !== 'video')
+      return { ok: false, error: 'No video track available for text' };
+    const tpl = textTemplateById(input.template);
+    const durationSec = Math.max(0.5, Math.min(input.durationSec ?? 3, 3600));
+    const trackEnd = track.clips.reduce((e, c) => Math.max(e, c.startSec + c.durationSec), 0);
+    const startSec = Math.max(0, input.startSec ?? trackEnd);
+    const text = typeof input.text === 'string' && input.text.length > 0 ? input.text : tpl.sample;
+    const clip: Clip = {
+      id: randomUUID(),
+      mediaId: 'text',
+      name: text.slice(0, 40),
+      startSec,
+      durationSec,
+      inSec: 0,
+      speed: 1,
+      volumeDb: 0,
+      fadeInSec: 0,
+      fadeOutSec: 0,
+      kind: 'text',
+      scale: tpl.scale,
+      posX: tpl.posX,
+      posY: tpl.posY,
+      cropL: 0,
+      cropT: 0,
+      cropR: 0,
+      cropB: 0,
+      filter: '',
+      text,
+      fontFamily: tpl.fontFamily,
+      fontSize: tpl.fontSize,
+      textColor: tpl.textColor,
+      textBg: tpl.textBg,
+      bold: tpl.bold,
+      textAlign: tpl.textAlign,
     };
     this.snapshot();
     track.clips.push(clip);
@@ -311,7 +385,7 @@ export class ProjectStore {
 
   setClipProps(
     clipId: string,
-    props: Partial<Pick<Clip, 'volumeDb' | 'speed' | 'fadeInSec' | 'fadeOutSec' | 'text' | 'name' | 'scale' | 'posX' | 'posY' | 'cropL' | 'cropT' | 'cropR' | 'cropB'>>,
+    props: Partial<Pick<Clip, 'volumeDb' | 'speed' | 'fadeInSec' | 'fadeOutSec' | 'text' | 'name' | 'scale' | 'posX' | 'posY' | 'cropL' | 'cropT' | 'cropR' | 'cropB' | 'filter' | 'fontFamily' | 'fontSize' | 'textColor' | 'textBg' | 'bold' | 'textAlign'>>,
   ): OpResult<Clip> {
     const found = this.findClip(clipId);
     if (!found) return { ok: false, error: `Unknown clip ${clipId}` };
@@ -328,6 +402,14 @@ export class ProjectStore {
     const merged = { ...found.clip, ...props };
     if (merged.cropL + merged.cropR >= 1 || merged.cropT + merged.cropB >= 1)
       return { ok: false, error: 'crop insets must leave a non-empty frame' };
+    if (props.filter !== undefined && !CLIP_FILTERS.some((f) => f.id === props.filter))
+      return { ok: false, error: `Unknown filter ${props.filter}` };
+    if (props.fontSize !== undefined && (!Number.isFinite(props.fontSize) || props.fontSize < 8 || props.fontSize > 500))
+      return { ok: false, error: 'fontSize must be between 8 and 500' };
+    if (props.textAlign !== undefined && props.textAlign !== 'left' && props.textAlign !== 'center' && props.textAlign !== 'right')
+      return { ok: false, error: 'textAlign must be left, center, or right' };
+    if (props.bold !== undefined && typeof props.bold !== 'boolean')
+      return { ok: false, error: 'bold must be a boolean' };
     this.snapshot();
     Object.assign(found.clip, props);
     this.touch();

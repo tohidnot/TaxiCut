@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useEditor, op } from '../store';
 import { formatTimecode } from '../time';
-import { canvasSize, type CanvasAspect, type Clip, type MediaAsset, type Project } from '../../../shared/types';
+import { canvasSize, clipFilterById, type CanvasAspect, type Clip, type MediaAsset, type Project } from '../../../shared/types';
 import {
   IconPlay,
   IconPause,
@@ -41,20 +41,38 @@ interface ActiveTimelineClips {
   visualMedia?: MediaAsset;
   audioClip?: Clip;
   audioMedia?: MediaAsset;
+  textClip?: Clip;
+}
+
+function allProjectClips(project: Project): Clip[] {
+  return (project.tracks ?? []).flatMap((t) => t.clips);
+}
+
+function findClipInProject(project: Project, id: string): Clip | undefined {
+  return allProjectClips(project).find((c) => c.id === id);
 }
 
 /** Topmost unmuted video-track clip wins the picture; first unmuted audio clip wins the extra audio element. */
 function findTimelineClips(project: Project, head: number): ActiveTimelineClips {
   const tracks = project.tracks ?? [];
   let visualClip: Clip | undefined;
+  let textClip: Clip | undefined;
   for (let i = tracks.length - 1; i >= 0; i--) {
     const t = tracks[i];
     if (t.kind !== 'video' || t.muted) continue;
-    const found = t.clips.find((c) => head >= c.startSec && head < c.startSec + c.durationSec);
-    if (found) {
-      visualClip = found;
-      break;
+    if (!visualClip) {
+      const found = t.clips.find(
+        (c) => c.kind !== 'text' && head >= c.startSec && head < c.startSec + c.durationSec,
+      );
+      if (found) visualClip = found;
     }
+    if (!textClip) {
+      const foundText = t.clips.find(
+        (c) => c.kind === 'text' && head >= c.startSec && head < c.startSec + c.durationSec,
+      );
+      if (foundText) textClip = foundText;
+    }
+    if (visualClip && textClip) break;
   }
   let audioClip: Clip | undefined;
   for (const t of tracks) {
@@ -67,7 +85,7 @@ function findTimelineClips(project: Project, head: number): ActiveTimelineClips 
   }
   const visualMedia = visualClip ? project.media.find((m) => m.id === visualClip.mediaId) : undefined;
   const audioMedia = audioClip ? project.media.find((m) => m.id === audioClip.mediaId) : undefined;
-  return { visualClip, visualMedia, audioClip, audioMedia };
+  return { visualClip, visualMedia, audioClip, audioMedia, textClip };
 }
 
 /** Point the element at this media if it isn't already. Keeps the decoder warm across gaps. */
@@ -207,13 +225,19 @@ export default function PreviewPanel() {
     ? project?.media.find((m) => m.id === selectedMediaId)
     : undefined;
 
-  const { visualClip, visualMedia, audioClip: activeAudioClip, audioMedia: activeAudioMedia } =
+  const { visualClip, visualMedia, audioClip: activeAudioClip, audioMedia: activeAudioMedia, textClip } =
     project ? findTimelineClips(project, playhead) : {};
 
   const activeSubtitleClip = tracks
     .filter((t) => !t.muted)
     .flatMap((t) => t.clips)
-    .find((c) => c.text && playhead >= c.startSec && playhead < c.startSec + c.durationSec);
+    .find(
+      (c) =>
+        c.kind !== 'text' &&
+        c.text &&
+        playhead >= c.startSec &&
+        playhead < c.startSec + c.durationSec,
+    );
   const subtitleText = activeSubtitleClip?.text;
 
   const currentFps = visualMedia?.fps || 30;
@@ -300,6 +324,12 @@ export default function PreviewPanel() {
   const keepT = fullT + effC.t * fullH;
   const keepW = fullW * Math.max(0.01, 1 - effC.l - effC.r);
   const keepH = fullH * Math.max(0.01, 1 - effC.t - effC.b);
+  // Live color look for the picture layer.
+  const cssFilter = visualClip ? clipFilterById(visualClip.filter).css : 'none';
+  const innerWithFilter: React.CSSProperties = {
+    ...innerStyle,
+    filter: cssFilter === 'none' ? undefined : cssFilter,
+  };
   // Transformed rect in box pixels (for the resize handles).
   const rectCX = boxW / 2 + effT.posX * boxW;
   const rectCY = boxH / 2 + effT.posY * boxH;
@@ -310,17 +340,17 @@ export default function PreviewPanel() {
   // Canvas drag (move) + corner-drag (uniform scale), CapCut-style.
   // Live state only; committed to the clip on pointer-up (one undo step).
   // -------------------------------------------------------------
-  const beginDrag = (e: React.PointerEvent, mode: 'move' | 'scale') => {
+  const beginDrag = (e: React.PointerEvent, mode: 'move' | 'scale', target: Clip | undefined) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!visualClip || boxW <= 0 || boxH <= 0 || cropMode) return;
-    const t = clipTransform(visualClip);
+    if (!target || boxW <= 0 || boxH <= 0 || cropMode) return;
+    const t = clipTransform(target);
     const box = boxRef.current?.getBoundingClientRect();
     const centerX = box ? box.left + box.width / 2 + t.posX * boxW : e.clientX;
     const centerY = box ? box.top + box.height / 2 + t.posY * boxH : e.clientY;
     dragRef.current = {
       mode,
-      clipId: visualClip.id,
+      clipId: target.id,
       startX: e.clientX,
       startY: e.clientY,
       lastX: e.clientX,
@@ -331,7 +361,7 @@ export default function PreviewPanel() {
       orig: t,
     };
     setDragging(true);
-    setLiveT({ id: visualClip.id, ...t });
+    setLiveT({ id: target.id, ...t });
     try {
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     } catch {
@@ -341,7 +371,10 @@ export default function PreviewPanel() {
 
   const moveDrag = (e: React.PointerEvent) => {
     const d = dragRef.current;
-    if (!d || !visualClip || d.clipId !== visualClip.id || boxW <= 0 || boxH <= 0) return;
+    if (!d || boxW <= 0 || boxH <= 0) return;
+    const proj = useEditor.getState().project;
+    const target = proj ? findClipInProject(proj, d.clipId) : undefined;
+    if (!target) return;
     d.lastX = e.clientX;
     d.lastY = e.clientY;
     if (d.mode === 'move') {
@@ -421,7 +454,7 @@ export default function PreviewPanel() {
             key={c.id}
             className="canvas-handle"
             style={{ left: c.x - 6, top: c.y - 6, cursor: handleCursor(c.id) }}
-            onPointerDown={(e) => beginDrag(e, 'scale')}
+            onPointerDown={(e) => beginDrag(e, 'scale', visualClip)}
             onPointerMove={moveDrag}
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
@@ -603,6 +636,121 @@ export default function PreviewPanel() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [cropMode, setCropMode]);
+
+  // -------------------------------------------------------------
+  // Text overlay (kind === 'text'): positioned by the same canvas
+  // transform, draggable/resizable, double-click to edit inline.
+  // -------------------------------------------------------------
+  const textLayerRef = useRef<HTMLDivElement>(null);
+  const [editingTextId, setEditingTextId] = useState<string | null>(null);
+  const [editText, setEditText] = useState('');
+  const [hoverTN, setHoverTN] = useState(0);
+  const [textRect, setTextRect] = useState({ x: 0, y: 0, w: 0, h: 0 });
+
+  const showTextLayer = previewMode === 'timeline' && !!textClip && !cropMode;
+  const textT: LiveTransform | { scale: number; posX: number; posY: number } =
+    liveT && textClip && liveT.id === textClip.id
+      ? liveT
+      : textClip
+        ? clipTransform(textClip)
+        : { scale: 1, posX: 0, posY: 0 };
+  const textFontPx = boxH > 0 ? Math.max(8, ((textClip?.fontSize || 72) * boxH) / 1080) : 16;
+  const isTextSelected = !!textClip && selectedClipId === textClip.id;
+  const showTextChrome =
+    !!showTextLayer &&
+    !!textClip &&
+    (hoverTN > 0 || isTextSelected || liveT?.id === textClip.id || editingTextId === textClip.id);
+
+  // Measure the laid-out text box for handle placement. Deps exclude the
+  // playhead so this never runs on playback ticks.
+  useLayoutEffect(() => {
+    if (!showTextChrome) return;
+    const box = boxRef.current?.getBoundingClientRect();
+    const el = textLayerRef.current;
+    if (!box || !el) return;
+    const r = el.getBoundingClientRect();
+    const next = { x: r.left - box.left, y: r.top - box.top, w: r.width, h: r.height };
+    setTextRect((prev) =>
+      Math.abs(prev.x - next.x) > 0.5 ||
+      Math.abs(prev.y - next.y) > 0.5 ||
+      Math.abs(prev.w - next.w) > 0.5 ||
+      Math.abs(prev.h - next.h) > 0.5
+        ? next
+        : prev,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    showTextChrome,
+    textClip?.id,
+    textClip?.text,
+    textClip?.fontSize,
+    textClip?.fontFamily,
+    textClip?.bold,
+    textClip?.textAlign,
+    textClip?.textColor,
+    textClip?.textBg,
+    textClip?.scale,
+    textClip?.posX,
+    textClip?.posY,
+    boxW,
+    boxH,
+    liveT,
+    editingTextId,
+  ]);
+
+  const textPointerHandlers = {
+    onPointerDown: (e: React.PointerEvent) => beginDrag(e, 'move', textClip),
+    onPointerMove: moveDrag,
+    onPointerUp: endDrag,
+    onPointerCancel: endDrag,
+    onPointerEnter: () => setHoverTN((n) => n + 1),
+    onPointerLeave: () => setHoverTN((n) => Math.max(0, n - 1)),
+    onDoubleClick: (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (textClip && editingTextId !== textClip.id) {
+        setEditingTextId(textClip.id);
+        setEditText(textClip.text ?? '');
+      }
+    },
+  };
+
+  const commitTextEdit = (save: boolean) => {
+    const id = editingTextId;
+    setEditingTextId(null);
+    if (!save || !id || !project) return;
+    const cur = findClipInProject(project, id);
+    const v = editText;
+    if (cur && v.trim().length > 0 && v !== (cur.text ?? '')) {
+      op({ op: 'clip:setProps', clipId: id, text: v, name: v.slice(0, 40) });
+    }
+  };
+
+  const renderTextHandles = () => {
+    if (!showTextChrome || !textClip || boxW <= 0 || textRect.w <= 0) return null;
+    const corners: { id: 'nw' | 'ne' | 'sw' | 'se'; x: number; y: number }[] = [
+      { id: 'nw', x: textRect.x, y: textRect.y },
+      { id: 'ne', x: textRect.x + textRect.w, y: textRect.y },
+      { id: 'sw', x: textRect.x, y: textRect.y + textRect.h },
+      { id: 'se', x: textRect.x + textRect.w, y: textRect.y + textRect.h },
+    ];
+    return (
+      <>
+        {corners.map((c) => (
+          <div
+            key={c.id}
+            className="canvas-handle"
+            style={{ left: c.x - 6, top: c.y - 6, cursor: handleCursor(c.id) }}
+            onPointerDown={(e) => beginDrag(e, 'scale', textClip)}
+            onPointerMove={moveDrag}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+            onPointerEnter={() => setHoverTN((n) => n + 1)}
+            onPointerLeave={() => setHoverTN((n) => Math.max(0, n - 1))}
+          />
+        ))}
+      </>
+    );
+  };
 
   // -------------------------------------------------------------
   // 1) Timeline playback: wall-clock drives the playhead, media slaves to it.
@@ -887,7 +1035,7 @@ export default function PreviewPanel() {
   };
 
   const layerPointerHandlers = {
-    onPointerDown: (e: React.PointerEvent) => beginDrag(e, 'move'),
+    onPointerDown: (e: React.PointerEvent) => beginDrag(e, 'move', visualClip),
     onPointerMove: moveDrag,
     onPointerUp: endDrag,
     onPointerCancel: endDrag,
@@ -973,7 +1121,7 @@ export default function PreviewPanel() {
             >
               {/* Transformable video layer (always mounted so the ref stays valid). */}
               <div className="canvas-layer" style={layerStyle} {...layerPointerHandlers}>
-                <div className="canvas-inner" style={innerStyle}>
+                <div className="canvas-inner" style={innerWithFilter}>
                   <video
                     ref={timelineVideoRef}
                     playsInline
@@ -990,7 +1138,7 @@ export default function PreviewPanel() {
               {/* Transformable image layer. */}
               {visualMedia?.kind === 'image' && visualClip && (
                 <div className="canvas-layer" style={layerStyle} {...layerPointerHandlers}>
-                  <div className="canvas-inner" style={innerStyle}>
+                  <div className="canvas-inner" style={innerWithFilter}>
                     <img src={window.taxicut.mediaUrl(visualMedia.path)} alt="" draggable={false} />
                   </div>
                 </div>
@@ -998,6 +1146,64 @@ export default function PreviewPanel() {
 
               {renderHandles()}
               {renderCropOverlay()}
+
+              {/* Text overlay layer (drag/resize like video, double-click to edit). */}
+              {showTextLayer && textClip && (
+                <div
+                  ref={textLayerRef}
+                  className="canvas-text"
+                  style={{
+                    left: boxW / 2,
+                    top: boxH / 2,
+                    width: 'max-content',
+                    maxWidth: boxW,
+                    transform: `translate(${textT.posX * boxW}px, ${textT.posY * boxH}px) scale(${textT.scale}) translate(-50%, -50%)`,
+                    fontFamily: textClip.fontFamily || 'Arial',
+                    fontSize: textFontPx,
+                    fontWeight: textClip.bold ? 700 : 400,
+                    color: textClip.textColor || '#ffffff',
+                    background: textClip.textBg || 'transparent',
+                    textAlign: textClip.textAlign || 'center',
+                  }}
+                  {...textPointerHandlers}
+                >
+                  {editingTextId === textClip.id ? (
+                    <textarea
+                      className="canvas-text-edit"
+                      value={editText}
+                      rows={3}
+                      onChange={(e) => setEditText(e.target.value)}
+                      onBlur={() => commitTextEdit(true)}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.stopPropagation();
+                          commitTextEdit(false);
+                        } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                          commitTextEdit(true);
+                        } else {
+                          e.stopPropagation();
+                        }
+                      }}
+                      ref={(el) => {
+                        el?.focus();
+                        el?.select();
+                      }}
+                      style={{
+                        fontFamily: 'inherit',
+                        fontSize: 'inherit',
+                        fontWeight: 'inherit',
+                        color: 'inherit',
+                        textAlign: 'inherit',
+                      }}
+                    />
+                  ) : (
+                    textClip.text
+                  )}
+                </div>
+              )}
+              {renderTextHandles()}
 
               {/* Timeline audio-only indicator (no video clip under playhead but audio is present). */}
               {!visualClip && (activeAudioMedia || visualMedia?.kind === 'audio') && (
