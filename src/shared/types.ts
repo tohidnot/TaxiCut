@@ -97,6 +97,7 @@ export type MainOp =
   | { op: 'project:open'; path?: string }
   | { op: 'project:save'; path?: string }
   | { op: 'media:import'; paths?: string[] }
+  | { op: 'media:delete'; mediaId: string }
   | { op: 'timeline:addClip'; mediaId: string; trackId?: string; startSec?: number; inSec?: number; durationSec?: number }
   | { op: 'timeline:moveClip'; clipId: string; startSec?: number; trackId?: string }
   | { op: 'timeline:trimClip'; clipId: string; edge: 'in' | 'out'; deltaSec: number }
@@ -104,7 +105,9 @@ export type MainOp =
   | { op: 'timeline:deleteClip'; clipId: string; ripple?: boolean }
   | { op: 'clip:setProps'; clipId: string; volumeDb?: number; speed?: number; fadeInSec?: number; fadeOutSec?: number; text?: string; name?: string }
   | { op: 'track:add'; kind: TrackKind }
+  | { op: 'track:delete'; trackId: string }
   | { op: 'track:setMute'; trackId: string; muted: boolean }
+  | { op: 'track:setLock'; trackId: string; locked: boolean }
   | { op: 'history:undo' }
   | { op: 'history:redo' }
   | { op: 'asr:transcribe'; mediaId: string }

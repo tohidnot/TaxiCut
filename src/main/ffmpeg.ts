@@ -88,6 +88,16 @@ function dbToGain(db: number): number {
   return Math.pow(10, db / 20);
 }
 
+function srtTime(sec: number): string {
+  const ms = Math.round(sec * 1000);
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  const r = ms % 1000;
+  const p = (n: number, w = 2) => String(n).padStart(w, '0');
+  return `${p(h)}:${p(m)}:${p(s)},${p(r, 3)}`;
+}
+
 /** Render the project to an mp4 via per-clip intermediates + concat, then mix extra audio tracks. */
 export async function exportProject(
   project: Project,
@@ -97,7 +107,8 @@ export async function exportProject(
   const W = opts.width ?? 1920;
   const H = opts.height ?? 1080;
   const FPS = opts.fps ?? 30;
-  const videoTrack: Track | undefined = project.tracks.find((t) => t.kind === 'video');
+  const unmutedVideoTracks = project.tracks.filter((t) => t.kind === 'video' && !t.muted);
+  const videoTrack: Track | undefined = unmutedVideoTracks[0];
   const mainVideoClips = videoTrack ? [...videoTrack.clips].sort((a, b) => a.startSec - b.startSec) : [];
   const audioClips = project.tracks
     .filter((t) => t.kind === 'audio' && !t.muted)
@@ -110,42 +121,76 @@ export async function exportProject(
   const dir = await mkdtemp(join(tmpdir(), 'taxicut-export-'));
   const mediaById = new Map(project.media.map((m) => [m.id, m]));
   try {
-    // 1) render each video clip to a uniform intermediate
+    const vf = `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${FPS},format=yuv420p`;
     const segments: string[] = [];
-    for (const [i, clip] of mainVideoClips.entries()) {
-      const media = mediaById.get(clip.mediaId);
-      if (!media) throw new Error(`Missing media for clip ${clip.name}`);
-      const seg = join(dir, `seg-${String(i).padStart(4, '0')}.mp4`);
-      const dur = clip.durationSec;
-      const vf = `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${FPS},format=yuv420p`;
-      const audioFilter =
-        `volume=${dbToGain(clip.volumeDb).toFixed(4)}` +
-        (clip.fadeInSec > 0 ? `,afade=t=in:st=0:d=${clip.fadeInSec}` : '') +
-        (clip.fadeOutSec > 0
-          ? `,afade=t=out:st=${Math.max(0, dur - clip.fadeOutSec)}:d=${clip.fadeOutSec}`
-          : '');
-      const args = ['-y', '-hide_banner', '-loglevel', 'error'];
-      if (media && clip.kind !== 'image' && media.kind !== 'image') {
-        args.push('-ss', clip.inSec.toFixed(3), '-i', media.path, '-t', dur.toFixed(3));
-      } else if (media) {
-        // image clip: loop the still
-        args.push('-loop', '1', '-t', dur.toFixed(3), '-i', media.path);
-      } else {
-        // plain color/text placeholder: black segment
-        args.push('-f', 'lavfi', '-t', dur.toFixed(3), '-i', `color=c=black:s=${W}x${H}:r=${FPS}`);
-      }
-      const hasSrcAudio = media?.hasAudio && media.kind !== 'image';
-      if (hasSrcAudio) {
-        args.push('-vf', vf, '-af', audioFilter, '-c:v', 'libx264', '-preset', 'veryfast',
-          '-crf', String(opts.crf ?? 18), '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-shortest', seg);
-      } else {
-        args.push('-f', 'lavfi', '-t', dur.toFixed(3), '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
-          '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(opts.crf ?? 18),
-          '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-shortest', seg);
-      }
-      await run(FFMPEG, args, { maxBuffer: 4 * 1024 * 1024 });
+    let segIndex = 0;
+    let cursorSec = 0;
+
+    const renderBlack = async (dur: number) => {
+      const seg = join(dir, `black-${String(segIndex++).padStart(4, '0')}.mp4`);
+      await run(FFMPEG, [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-t', dur.toFixed(3), '-i', `color=c=black:s=${W}x${H}:r=${FPS}`,
+        '-f', 'lavfi', '-t', dur.toFixed(3), '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+        '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(opts.crf ?? 18),
+        '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-shortest', seg,
+      ]);
       segments.push(seg);
-      opts.onProgress?.((i + 1) / (mainVideoClips.length + 1));
+    };
+
+    if (mainVideoClips.length === 0 && audioClips.length > 0) {
+      // Audio-only: generate black background matching audio duration
+      const totalDur = audioClips.reduce((max, c) => Math.max(max, c.startSec + c.durationSec), 0);
+      await renderBlack(Math.max(1, totalDur));
+    } else {
+      // 1) render each video clip to a uniform intermediate, filling gaps with black
+      for (const [i, clip] of mainVideoClips.entries()) {
+        const gap = clip.startSec - cursorSec;
+        if (gap > 0.03) {
+          await renderBlack(gap);
+          cursorSec += gap;
+        }
+
+        const media = mediaById.get(clip.mediaId);
+        if (!media) throw new Error(`Missing media for clip ${clip.name}`);
+        const seg = join(dir, `seg-${String(segIndex++).padStart(4, '0')}.mp4`);
+        const dur = clip.durationSec;
+        const audioFilter =
+          `volume=${dbToGain(clip.volumeDb).toFixed(4)}` +
+          (clip.fadeInSec > 0 ? `,afade=t=in:st=0:d=${clip.fadeInSec}` : '') +
+          (clip.fadeOutSec > 0
+            ? `,afade=t=out:st=${Math.max(0, dur - clip.fadeOutSec)}:d=${clip.fadeOutSec}`
+            : '');
+        const args = ['-y', '-hide_banner', '-loglevel', 'error'];
+        if (media && clip.kind !== 'image' && media.kind !== 'image') {
+          args.push('-ss', clip.inSec.toFixed(3), '-i', media.path, '-t', dur.toFixed(3));
+        } else if (media) {
+          // image clip: loop the still
+          args.push('-loop', '1', '-t', dur.toFixed(3), '-i', media.path);
+        } else {
+          // plain color/text placeholder: black segment
+          args.push('-f', 'lavfi', '-t', dur.toFixed(3), '-i', `color=c=black:s=${W}x${H}:r=${FPS}`);
+        }
+        const hasSrcAudio = media?.hasAudio && media.kind !== 'image';
+        if (hasSrcAudio) {
+          args.push('-vf', vf, '-af', audioFilter, '-c:v', 'libx264', '-preset', 'veryfast',
+            '-crf', String(opts.crf ?? 18), '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-shortest', seg);
+        } else {
+          args.push('-f', 'lavfi', '-t', dur.toFixed(3), '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+            '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(opts.crf ?? 18),
+            '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-shortest', seg);
+        }
+        await run(FFMPEG, args, { maxBuffer: 4 * 1024 * 1024 });
+        segments.push(seg);
+        cursorSec = clip.startSec + clip.durationSec;
+        opts.onProgress?.((i + 1) / (mainVideoClips.length + 1));
+      }
+
+      // Fill remaining gap if audio clips extend beyond last video clip
+      const maxAudioEnd = audioClips.reduce((max, c) => Math.max(max, c.startSec + c.durationSec), 0);
+      if (maxAudioEnd > cursorSec + 0.03) {
+        await renderBlack(maxAudioEnd - cursorSec);
+      }
     }
 
     // 2) concat video segments
@@ -167,12 +212,12 @@ export async function exportProject(
         inputs.push('-ss', clip.inSec.toFixed(3), '-t', clip.durationSec.toFixed(3), '-i', media.path);
         const delayMs = Math.round(clip.startSec * 1000);
         filters.push(
-          `[${n}:a]volume=${dbToGain(clip.volumeDb).toFixed(4)},adelay=${delayMs}|${delayMs},apad[a${n}]`,
+          `[${n}:a]volume=${dbToGain(clip.volumeDb).toFixed(4)},adelay=${delayMs}|${delayMs}[a${n}]`,
         );
         mixLabels.push(`[a${n}]`);
       });
       if (mixLabels.length > 1) {
-        filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:normalize=0[aout]`);
+        filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=first:dropout_transition=0[aout]`);
         await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', ...inputs,
           '-filter_complex', filters.join(';'), '-map', '0:v', '-map', '[aout]',
           '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', outPath]);
@@ -182,6 +227,21 @@ export async function exportProject(
     } else {
       await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', '-i', concatOut, '-c', 'copy', outPath]);
     }
+
+    // 4) Write sidecar SRT if subtitle clips are present
+    const subtitleClips = project.tracks
+      .filter((t) => !t.muted)
+      .flatMap((t) => t.clips)
+      .filter((c) => Boolean(c.text))
+      .sort((a, b) => a.startSec - b.startSec);
+    if (subtitleClips.length > 0) {
+      const srtPath = outPath.replace(/\.[^.]+$/, '') + '.srt';
+      const srtLines = subtitleClips
+        .map((c, i) => `${i + 1}\n${srtTime(c.startSec)} --> ${srtTime(c.startSec + c.durationSec)}\n${c.text}\n`)
+        .join('\n');
+      await writeFile(srtPath, srtLines, 'utf8').catch(() => {});
+    }
+
     opts.onProgress?.(1);
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});

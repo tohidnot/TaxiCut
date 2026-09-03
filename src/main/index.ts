@@ -1,7 +1,9 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol } from 'electron';
-import { join } from 'node:path';
+import { app, BrowserWindow, dialog, ipcMain, protocol } from 'electron';
+import { extname, join } from 'node:path';
+import { stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { Readable } from 'node:stream';
 import { homedir } from 'node:os';
-import { pathToFileURL } from 'node:url';
 import { IPC, type MainOp, type OpResult } from '../shared/types';
 import { ProjectStore } from './store';
 import { startMcpHttpServer } from './mcp';
@@ -17,7 +19,17 @@ const cacheDir = join(homedir(), '.taxicut', 'cache');
 
 // Allow the custom media scheme to serve video streams and bypass CORS in the renderer.
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'taxicut-file', privileges: { stream: true, bypassCSP: true, supportFetchAPI: true } },
+  {
+    scheme: 'taxicut-file',
+    privileges: {
+      stream: true,
+      bypassCSP: true,
+      supportFetchAPI: true,
+      standard: true,
+      secure: true,
+      corsEnabled: true,
+    },
+  },
 ]);
 
 const store = new ProjectStore();
@@ -46,14 +58,44 @@ function createWindow(): void {
 async function handleOp(op: MainOp): Promise<OpResult> {
   // store-level ops
   const storeOps = [
-    'project:get', 'project:new', 'project:open', 'project:save',
+    'project:get', 'project:new',
     'timeline:addClip', 'timeline:moveClip', 'timeline:trimClip', 'timeline:splitClip',
-    'timeline:deleteClip', 'clip:setProps', 'track:add', 'track:setMute',
-    'history:undo', 'history:redo',
+    'timeline:deleteClip', 'clip:setProps', 'track:add', 'track:delete', 'track:setMute', 'track:setLock',
+    'media:delete', 'history:undo', 'history:redo',
   ];
   if (storeOps.includes(op.op)) return store.dispatch(op);
 
   switch (op.op) {
+    case 'project:open': {
+      let p = op.path;
+      if (!p) {
+        const r = await dialog.showOpenDialog({
+          properties: ['openFile'],
+          filters: [
+            { name: 'TaxiCut Project', extensions: ['taxicut', 'json'] },
+            { name: 'All Files', extensions: ['*'] },
+          ],
+        });
+        if (r.canceled || r.filePaths.length === 0) return { ok: false, error: 'Open cancelled' };
+        p = r.filePaths[0];
+      }
+      return store.dispatch({ op: 'project:open', path: p });
+    }
+    case 'project:save': {
+      let p = op.path ?? store.filePath ?? undefined;
+      if (!p) {
+        const r = await dialog.showSaveDialog({
+          defaultPath: `${store.project.name || 'project'}.taxicut`,
+          filters: [
+            { name: 'TaxiCut Project', extensions: ['taxicut', 'json'] },
+            { name: 'All Files', extensions: ['*'] },
+          ],
+        });
+        if (r.canceled || !r.filePath) return { ok: false, error: 'Save cancelled' };
+        p = r.filePath;
+      }
+      return store.dispatch({ op: 'project:save', path: p });
+    }
     case 'media:import': {
       let paths = op.paths;
       if (!paths || paths.length === 0) {
@@ -147,11 +189,125 @@ async function handleOp(op: MainOp): Promise<OpResult> {
   }
 }
 
+const MEDIA_MIME: Record<string, string> = {
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/x-m4v',
+  '.mov': 'video/quicktime',
+  '.mkv': 'video/x-matroska',
+  '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.bmp': 'image/bmp',
+};
+
+function mimeForPath(p: string): string {
+  return MEDIA_MIME[extname(p).toLowerCase()] ?? 'application/octet-stream';
+}
+
 app.whenReady().then(async () => {
-  // Serve local media/thumbnail files to the renderer.
-  protocol.handle('taxicut-file', (req) =>
-    net.fetch(pathToFileURL(decodeURIComponent(new URL(req.url).pathname)).toString()),
-  );
+  // Serve local media/thumbnail files to the renderer with HTTP Range support,
+  // otherwise Chromium reports the resource as unseekable and every seek
+  // (scrub, clip in-points, drift correction) snaps back to 0 and stalls.
+  protocol.handle('taxicut-file', async (req) => {
+    try {
+      const url = new URL(req.url);
+      let p = url.searchParams.get('path');
+      if (!p) {
+        const raw = decodeURIComponent(url.pathname);
+        if (raw && raw !== '/') {
+          p = raw;
+        } else if (url.host && url.host !== 'local') {
+          p = decodeURIComponent(url.host);
+        }
+      }
+      if (!p) {
+        return new Response('File path missing', { status: 400 });
+      }
+      if (process.platform !== 'win32' && !p.startsWith('/')) {
+        p = '/' + p;
+      }
+      const st = await stat(p);
+      if (!st.isFile()) return new Response('Not found', { status: 404 });
+      const size = st.size;
+      const type = mimeForPath(p);
+
+      if (req.method === 'HEAD') {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            'Accept-Ranges': 'bytes',
+            'Content-Length': String(size),
+            'Content-Type': type,
+          },
+        });
+      }
+
+      const range = req.headers.get('range');
+      if (range) {
+        const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+        if (!m) {
+          return new Response('Bad range', {
+            status: 416,
+            headers: { 'Content-Range': `bytes */${size}` },
+          });
+        }
+        let start = m[1] === '' ? NaN : Number(m[1]);
+        let end = m[2] === '' ? NaN : Number(m[2]);
+        if (Number.isNaN(start) && Number.isNaN(end)) {
+          return new Response('Bad range', {
+            status: 416,
+            headers: { 'Content-Range': `bytes */${size}` },
+          });
+        }
+        if (Number.isNaN(start)) {
+          // Suffix range: last N bytes.
+          const suffix = end === 0 ? 0 : end;
+          start = Math.max(0, size - suffix);
+          end = size - 1;
+        } else if (Number.isNaN(end) || end >= size) {
+          end = size - 1;
+        }
+        if (!Number.isFinite(start) || !Number.isFinite(end) || start >= size || start > end) {
+          return new Response('Range unsatisfiable', {
+            status: 416,
+            headers: { 'Content-Range': `bytes */${size}` },
+          });
+        }
+        const body = Readable.toWeb(createReadStream(p, { start, end }));
+        return new Response(body as ReadableStream, {
+          status: 206,
+          headers: {
+            'Accept-Ranges': 'bytes',
+            'Content-Length': String(end - start + 1),
+            'Content-Range': `bytes ${start}-${end}/${size}`,
+            'Content-Type': type,
+          },
+        });
+      }
+
+      const body = Readable.toWeb(createReadStream(p));
+      return new Response(body as ReadableStream, {
+        status: 200,
+        headers: {
+          'Accept-Ranges': 'bytes',
+          'Content-Length': String(size),
+          'Content-Type': type,
+        },
+      });
+    } catch (err) {
+      return new Response((err as Error).message, { status: 404 });
+    }
+  });
 
   store.onChange((project, filePath) => {
     mainWindow?.webContents.send(IPC.projectState, { project, filePath });

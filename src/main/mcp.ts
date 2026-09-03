@@ -81,12 +81,40 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
   server.tool('list_media', 'List all imported media assets.', {},
     async () => ok(store.project.media));
 
+  server.tool('delete_media', 'Delete a media asset and any timeline clips using it.',
+    { mediaId: z.string() },
+    async ({ mediaId }) => {
+      const r = await store.dispatch({ op: 'media:delete', mediaId });
+      return r.ok ? ok(r.data) : fail(r.error!);
+    });
+
   server.tool('get_timeline', 'Get the full timeline: tracks and clips with ids, positions, trims, and audio settings.',
     {}, async () => ok(store.project.tracks));
 
   server.tool('add_track', 'Add a video or audio track.',
     { kind: z.enum(['video', 'audio']) },
     async ({ kind }) => ok(unwrap(await store.dispatch({ op: 'track:add', kind }))));
+
+  server.tool('delete_track', 'Delete a track and its clips from the timeline.',
+    { trackId: z.string() },
+    async ({ trackId }) => {
+      const r = await store.dispatch({ op: 'track:delete', trackId });
+      return r.ok ? ok(r.data) : fail(r.error!);
+    });
+
+  server.tool('set_track_mute', 'Mute or unmute an audio or video track.',
+    { trackId: z.string(), muted: z.boolean() },
+    async ({ trackId, muted }) => {
+      const r = await store.dispatch({ op: 'track:setMute', trackId, muted });
+      return r.ok ? ok(r.data) : fail(r.error!);
+    });
+
+  server.tool('set_track_lock', 'Lock or unlock a track against edits.',
+    { trackId: z.string(), locked: z.boolean() },
+    async ({ trackId, locked }) => {
+      const r = await store.dispatch({ op: 'track:setLock', trackId, locked });
+      return r.ok ? ok(r.data) : fail(r.error!);
+    });
 
   server.tool('add_clip',
     'Append (or place) a media item on the timeline. Defaults to the end of the first matching-kind track.',

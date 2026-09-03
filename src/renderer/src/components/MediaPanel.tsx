@@ -1,68 +1,177 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { useEditor, op } from '../store';
 import { formatDuration } from '../time';
 import type { MediaAsset } from '../../../shared/types';
+import {
+  IconUpload,
+  IconPlus,
+  IconClose,
+  IconSubtitles,
+  IconTrash,
+  IconPlay,
+  IconVideo,
+  IconAudio,
+  IconImage,
+} from './Icons';
 
 export default function MediaPanel() {
   const project = useEditor((s) => s.project);
+  const selectedMediaId = useEditor((s) => s.selectedMediaId);
+  const selectMedia = useEditor((s) => s.selectMedia);
+  const playheadSec = useEditor((s) => s.playheadSec);
+  const setPreviewMode = useEditor((s) => s.setPreviewMode);
+
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(false);
+  const [busyMessage, setBusyMessage] = useState('');
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; media: MediaAsset } | null>(null);
+
   const media = (project?.media ?? []).filter((m) =>
     m.name.toLowerCase().includes(query.toLowerCase()),
   );
 
   const importMedia = () => op({ op: 'media:import' });
 
+  const deleteMedia = async (m: MediaAsset) => {
+    if (confirm(`Remove "${m.name}" and any clips using it from the project?`)) {
+      await op({ op: 'media:delete', mediaId: m.id });
+      if (selectedMediaId === m.id) selectMedia(null);
+    }
+  };
+
+  const addClipAtPlayhead = (mediaId: string) => {
+    setPreviewMode('timeline');
+    op({ op: 'timeline:addClip', mediaId, startSec: playheadSec });
+  };
+
   const transcribe = async (m: MediaAsset) => {
     setBusy(true);
+    setBusyMessage(`Transcribing ${m.name} with Parakeet…`);
     const r = await op({ op: 'asr:subtitles', mediaId: m.id });
     setBusy(false);
+    setBusyMessage('');
     if (!r.ok) alert(r.error);
   };
 
+  const handleFileDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+
+    const paths: string[] = files
+      .map((f) => window.taxicut.getPathForFile(f))
+      .filter((p): p is string => Boolean(p && p.length > 0));
+
+    if (paths.length > 0) {
+      await op({ op: 'media:import', paths });
+    }
+  };
+
   return (
-    <div className="media-panel">
+    <div
+      className={`media-panel ${isDragOver ? 'drag-over' : ''}`}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setIsDragOver(true);
+      }}
+      onDragLeave={() => setIsDragOver(false)}
+      onDrop={handleFileDrop}
+      onClick={() => setContextMenu(null)}
+    >
       <div className="panel-header">
-        <button className="accent" onClick={importMedia}>
-          + Import
+        <span>Media Library</span>
+        <button onClick={importMedia} title="Import video, audio, or images" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+          <IconUpload size={12} /> Import…
         </button>
+      </div>
+
+      <div className="media-search">
         <input
           type="text"
-          placeholder="Search"
+          placeholder="Filter media…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          style={{ flex: 1, minWidth: 0 }}
         />
       </div>
-      <div className="panel-header">
-        Library {media.length > 0 && <span style={{ marginLeft: 'auto' }}>{media.length} items</span>}
-      </div>
+
       <div className="media-grid">
         {media.length === 0 && (
           <div className="media-empty">
-            No media yet.
-            <br />
-            Click Import to add video, audio, or images.
+            {query ? (
+              'No media matches your search.'
+            ) : (
+              <>
+                No media yet.
+                <br />
+                Click <b>Import</b> or drag files from Finder/Desktop here.
+              </>
+            )}
           </div>
         )}
+
         {media.map((m) => (
           <div
             key={m.id}
-            className="media-card"
+            className={`media-card ${selectedMediaId === m.id ? 'selected' : ''}`}
             draggable
-            title={m.path}
-            onDragStart={(e) => e.dataTransfer.setData('application/x-taxicut-media', m.id)}
-            onDoubleClick={() => op({ op: 'timeline:addClip', mediaId: m.id })}
+            title={`${m.name} (${m.path})`}
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-taxicut-media', m.id);
+            }}
+            onClick={() => selectMedia(m.id)}
+            onDoubleClick={() => addClipAtPlayhead(m.id)}
             onContextMenu={(e) => {
               e.preventDefault();
-              if (m.hasAudio && !busy) transcribe(m);
+              e.stopPropagation();
+              setContextMenu({ x: e.clientX, y: e.clientY, media: m });
             }}
           >
+            <div className="media-actions">
+              <button
+                className="media-action-btn"
+                title="Add to timeline at playhead"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  addClipAtPlayhead(m.id);
+                }}
+              >
+                <IconPlus size={11} />
+              </button>
+              {m.hasAudio && (
+                <button
+                  className="media-action-btn"
+                  title="Generate Subtitles"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!busy) transcribe(m);
+                  }}
+                >
+                  <IconSubtitles size={11} />
+                </button>
+              )}
+              <button
+                className="media-action-btn"
+                title="Remove from project"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  deleteMedia(m);
+                }}
+              >
+                <IconClose size={11} />
+              </button>
+            </div>
+
             <div className="media-thumb">
               {m.thumbnailPath ? (
                 <img src={window.taxicut.mediaUrl(m.thumbnailPath)} alt="" />
               ) : (
-                <span>{m.kind === 'audio' ? '♪' : '▢'}</span>
+                <span>
+                  {m.kind === 'audio' ? <IconAudio size={24} /> : m.kind === 'image' ? <IconImage size={24} /> : <IconVideo size={24} />}
+                </span>
               )}
               <span className="media-dur">{formatDuration(m.durationSec)}</span>
             </div>
@@ -70,7 +179,63 @@ export default function MediaPanel() {
           </div>
         ))}
       </div>
-      {busy && <div className="panel-header">Transcribing with Parakeet…</div>}
+
+      {busy && <div className="panel-header" style={{ color: 'var(--accent)' }}>{busyMessage}</div>}
+
+      {/* Media Context Menu */}
+      {contextMenu && (
+        <div
+          className="context-menu"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            className="context-menu-item"
+            style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+            onClick={() => {
+              selectMedia(contextMenu.media.id);
+              setContextMenu(null);
+            }}
+          >
+            <IconPlay size={12} /> Preview in Viewer
+          </div>
+          <div
+            className="context-menu-item"
+            style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+            onClick={() => {
+              addClipAtPlayhead(contextMenu.media.id);
+              setContextMenu(null);
+            }}
+          >
+            <IconPlus size={12} /> Add to Timeline at Playhead
+          </div>
+          {contextMenu.media.hasAudio && (
+            <div
+              className="context-menu-item"
+              style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+              onClick={() => {
+                const target = contextMenu.media;
+                setContextMenu(null);
+                transcribe(target);
+              }}
+            >
+              <IconSubtitles size={12} /> Generate Subtitles (Parakeet)
+            </div>
+          )}
+          <div className="context-menu-divider" />
+          <div
+            className="context-menu-item"
+            style={{ color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: 6 }}
+            onClick={() => {
+              const target = contextMenu.media;
+              setContextMenu(null);
+              deleteMedia(target);
+            }}
+          >
+            <IconTrash size={12} /> Delete Media Asset
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { IPC, type MainOp, type OpResult } from '../shared/types';
 
 export const api = {
@@ -29,7 +29,14 @@ export const api = {
       return () => { ipcRenderer.removeListener(IPC.termExit, fn); };
     },
   },
-  mediaUrl: (filePath: string) => `taxicut-file://${encodeURIComponent(filePath)}`,
+  mediaUrl: (filePath: string) => `taxicut-file://local?path=${encodeURIComponent(filePath)}`,
+  getPathForFile: (file: File): string => {
+    try {
+      return webUtils.getPathForFile(file);
+    } catch {
+      return (file as unknown as { path?: string }).path ?? '';
+    }
+  },
 };
 
 export type TaxiCutApi = typeof api;
