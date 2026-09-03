@@ -87,6 +87,43 @@ export default function TimelinePanel() {
     return Math.max(0, (e.clientX - rect.left + scroller.scrollLeft) / pxPerSec);
   };
 
+  // Edge auto-scroll: when the pointer nears the scroll viewport edges,
+  // pan so the user can drag/scrub beyond the visible area. Returns nothing;
+  // callers re-read scroll offsets afterwards.
+  const autoScroll = (clientX: number, clientY?: number) => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const rect = scroller.getBoundingClientRect();
+    const margin = 28;
+    const step = 26;
+    if (clientX < rect.left + margin) scroller.scrollLeft -= step;
+    else if (clientX > rect.right - margin) scroller.scrollLeft += step;
+    if (clientY !== undefined) {
+      if (clientY < rect.top + margin) scroller.scrollTop -= step;
+      else if (clientY > rect.bottom - margin) scroller.scrollTop += step;
+    }
+  };
+
+  // Live drag/trim geometry for a clip (shared by the clip and its ghost).
+  const liveGeom = (c: Clip): { start: number; dur: number } => {
+    let s = c.startSec;
+    let d = c.durationSec;
+    if (activeDrag && activeDrag.clipId === c.id) {
+      if (activeDrag.mode === 'move') {
+        s = Math.max(0, c.startSec + activeDrag.deltaSec);
+      } else if (activeDrag.mode === 'l') {
+        s = Math.max(0, c.startSec + activeDrag.deltaSec);
+        d = Math.max(0.1, c.durationSec - activeDrag.deltaSec);
+      } else if (activeDrag.mode === 'r') {
+        d = Math.max(0.1, c.durationSec + activeDrag.deltaSec);
+      }
+    }
+    return { start: s, dur: d };
+  };
+  const draggedClip: Clip | null = activeDrag
+    ? (tracks.flatMap((t) => t.clips).find((c) => c.id === activeDrag.clipId) ?? null)
+    : null;
+
   const getSnapTargets = (excludeClipId?: string): number[] => {
     const targets = new Set<number>([0, playhead]);
     for (const t of tracks) {
@@ -119,6 +156,31 @@ export default function TimelinePanel() {
     if (selectedId) {
       op({ op: 'timeline:deleteClip', clipId: selectedId, ripple });
       select(null);
+    }
+  };
+
+  // Stepwise layer reshuffle: visually up = toward the foreground.
+  // Video lanes display top-first (reversed array); audio lanes display in order.
+  const layerDest = (track: Track, dir: 1 | -1): { dest?: Track; canCreate: boolean } => {
+    const same = tracks.filter((t) => t.kind === track.kind);
+    const idx = same.findIndex((t) => t.id === track.id);
+    if (track.kind === 'video') {
+      if (dir === 1) return { dest: same[idx + 1], canCreate: true }; // new layers stack on top
+      return { dest: same[idx - 1], canCreate: false }; // V1 is the bottom
+    }
+    if (dir === 1) return { dest: same[idx - 1], canCreate: false }; // A1 is the top
+    return { dest: same[idx + 1], canCreate: true }; // new audio appends at the bottom
+  };
+
+  const moveLayer = async (clip: Clip, track: Track, dir: 1 | -1) => {
+    const { dest, canCreate } = layerDest(track, dir);
+    let target = dest;
+    if (!target && canCreate) {
+      const r = await op({ op: 'track:add', kind: track.kind });
+      if (r.ok && r.data) target = r.data as Track;
+    }
+    if (target) {
+      await op({ op: 'timeline:moveClip', clipId: clip.id, trackId: target.id });
     }
   };
 
@@ -156,6 +218,7 @@ export default function TimelinePanel() {
       let matchedSnap: number | null = null;
 
       if (mode === 'move') {
+        autoScroll(ev.clientX, ev.clientY);
         const candidateStart = Math.max(0, clip.startSec + rawDelta);
         const candidateEnd = candidateStart + clip.durationSec;
         for (const target of snapTargets) {
@@ -548,12 +611,13 @@ export default function TimelinePanel() {
           <div className="tracks-inner" style={{ width, minWidth: '100%' }}>
             <div
               className="ruler"
-              onMouseDown={(e) => {
+                onMouseDown={(e) => {
                 setPreviewMode('timeline');
                 setPlayhead(secFromEvent(e));
                 const onMove = (ev: MouseEvent) => {
                   const scroller = scrollRef.current;
                   if (!scroller) return;
+                  autoScroll(ev.clientX);
                   const rect = scroller.getBoundingClientRect();
                   setPlayhead(Math.max(0, (ev.clientX - rect.left + scroller.scrollLeft) / pxPerSec));
                 };
@@ -593,7 +657,7 @@ export default function TimelinePanel() {
 
                 return (
                   <div
-                    className={`track-lane ${t.kind} ${dragOverTrackId === t.id ? 'drag-over' : ''}`}
+                    className={`track-lane ${t.kind} ${dragOverTrackId === t.id || activeDrag?.targetTrackId === t.id ? 'drag-over' : ''}`}
                     key={t.id}
                     data-track-id={t.id}
                     onDragOver={(e) => {
@@ -616,19 +680,8 @@ export default function TimelinePanel() {
                       const imageUrl = media?.kind === 'image' ? window.taxicut.mediaUrl(media.path) : null;
                       const previewUrl = thumbUrl || imageUrl;
 
-                      // Compute live coordinates if clip is currently being dragged/trimmed
-                      let liveStart = c.startSec;
-                      let liveDur = c.durationSec;
-                      if (activeDrag && activeDrag.clipId === c.id) {
-                        if (activeDrag.mode === 'move') {
-                          liveStart = Math.max(0, c.startSec + activeDrag.deltaSec);
-                        } else if (activeDrag.mode === 'l') {
-                          liveStart = Math.max(0, c.startSec + activeDrag.deltaSec);
-                          liveDur = Math.max(0.1, c.durationSec - activeDrag.deltaSec);
-                        } else if (activeDrag.mode === 'r') {
-                          liveDur = Math.max(0.1, c.durationSec + activeDrag.deltaSec);
-                        }
-                      }
+                      // Live coordinates while dragging/trimming.
+                      const { start: liveStart, dur: liveDur } = liveGeom(c);
 
                       const clipWidth = Math.max(6, liveDur * pxPerSec);
                       const frameCount = Math.min(30, Math.max(1, Math.floor(clipWidth / 75)));
@@ -711,6 +764,19 @@ export default function TimelinePanel() {
                         </div>
                       );
                     })}
+                    {/* Ghost: where the dragged clip will land on this lane. */}
+                    {activeDrag?.mode === 'move' && activeDrag.targetTrackId === t.id && draggedClip &&
+                      !t.clips.some((c) => c.id === draggedClip.id) && (() => {
+                        const g = liveGeom(draggedClip);
+                        return (
+                          <div
+                            className={`clip ghost ${draggedClip.kind}`}
+                            style={{ left: g.start * pxPerSec, width: Math.max(6, g.dur * pxPerSec) }}
+                          >
+                            <span className="clip-title">{draggedClip.text ?? draggedClip.name}</span>
+                          </div>
+                        );
+                      })()}
                   </div>
                 );
               })}
@@ -768,6 +834,41 @@ export default function TimelinePanel() {
           >
             <IconRipple size={12} /> Ripple Delete
           </div>
+          <div className="context-menu-divider" />
+          {(() => {
+            const up = layerDest(contextMenu.track, 1);
+            const down = layerDest(contextMenu.track, -1);
+            const upDisabled = !up.dest && !up.canCreate;
+            const downDisabled = !down.dest && !down.canCreate;
+            return (
+              <>
+                <div
+                  className={`context-menu-item${upDisabled ? ' disabled' : ''}`}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                  onClick={() => {
+                    if (upDisabled) return;
+                    moveLayer(contextMenu.clip, contextMenu.track, 1);
+                    setContextMenu(null);
+                  }}
+                  title="Move to the layer above (creates one past the top)"
+                >
+                  ↑ Move up a layer{!up.dest && up.canCreate ? ' (new layer)' : ''}
+                </div>
+                <div
+                  className={`context-menu-item${downDisabled ? ' disabled' : ''}`}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                  onClick={() => {
+                    if (downDisabled) return;
+                    moveLayer(contextMenu.clip, contextMenu.track, -1);
+                    setContextMenu(null);
+                  }}
+                  title="Move to the layer below (creates one past the bottom)"
+                >
+                  ↓ Move down a layer{!down.dest && down.canCreate ? ' (new layer)' : ''}
+                </div>
+              </>
+            );
+          })()}
         </div>
       )}
     </div>

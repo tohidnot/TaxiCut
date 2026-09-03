@@ -505,6 +505,16 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 .clip.selected { outline: 2px solid #fff; z-index: 2; }
 /* Legacy same-track overlaps (new clips auto-layer instead): red flag. */
 .clip.overlap { outline: 2px dashed var(--danger); outline-offset: -2px; }
+/* Drag ghost: landing preview on the target lane. */
+.clip.ghost {
+  opacity: 0.5;
+  border-style: dashed;
+  border-color: #fff;
+  pointer-events: none;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+}
 .track-lane.video { background: rgba(107, 79, 216, 0.06); }
 .track-lane.audio { background: rgba(46, 125, 79, 0.07); }
 /* Kind chip in the track header: V1/V2… video, A1/A2… audio. */
@@ -793,6 +803,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   color: var(--text);
 }
 .context-menu-item:hover { background: var(--accent); color: #ffffff; }
+.context-menu-item.disabled { opacity: 0.35; pointer-events: none; }
 .context-menu-divider {
   height: 1px;
   background: var(--border);
