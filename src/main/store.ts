@@ -19,6 +19,27 @@ export interface StoreListener {
 
 const MAX_HISTORY = 100;
 
+const VALID_ASPECTS = new Set(['16:9', '9:16', '1:1', '4:3', '4:5', 'custom']);
+
+/** Fill in fields added after v1 files were written (aspect, clip transforms). */
+function migrateProject(p: Project): void {
+  if (!VALID_ASPECTS.has(p.aspect as string)) p.aspect = '16:9';
+  if (!Number.isFinite(p.customW) || p.customW < 16) p.customW = 1920;
+  if (!Number.isFinite(p.customH) || p.customH < 16) p.customH = 1080;
+  for (const t of p.tracks ?? []) {
+    for (const c of t.clips ?? []) {
+      if (!Number.isFinite(c.scale) || c.scale <= 0) c.scale = 1;
+      if (!Number.isFinite(c.posX)) c.posX = 0;
+      if (!Number.isFinite(c.posY)) c.posY = 0;
+      for (const k of ['cropL', 'cropT', 'cropR', 'cropB'] as const) {
+        if (!Number.isFinite(c[k]) || c[k] < 0 || c[k] > 0.9) c[k] = 0;
+      }
+      if (c.cropL + c.cropR >= 1) { c.cropL = 0; c.cropR = 0; }
+      if (c.cropT + c.cropB >= 1) { c.cropT = 0; c.cropB = 0; }
+    }
+  }
+}
+
 export class ProjectStore {
   project: Project = ProjectStore.empty();
   filePath: string | null = null;
@@ -30,6 +51,9 @@ export class ProjectStore {
     return {
       version: 1,
       name,
+      aspect: '16:9',
+      customW: 1920,
+      customH: 1080,
       media: [],
       tracks: [
         { id: randomUUID(), kind: 'video', name: 'V1', muted: false, locked: false, clips: [] },
@@ -96,6 +120,7 @@ export class ProjectStore {
       const parsed = JSON.parse(raw) as Project;
       if (parsed.version !== 1 || !Array.isArray(parsed.tracks))
         return { ok: false, error: 'Not a TaxiCut project file' };
+      migrateProject(parsed);
       this.project = parsed;
       this.filePath = path;
       this.undoStack = [];
@@ -183,6 +208,13 @@ export class ProjectStore {
       fadeInSec: 0,
       fadeOutSec: 0,
       kind: media.kind,
+      scale: 1,
+      posX: 0,
+      posY: 0,
+      cropL: 0,
+      cropT: 0,
+      cropR: 0,
+      cropB: 0,
     };
     this.snapshot();
     track.clips.push(clip);
@@ -279,14 +311,46 @@ export class ProjectStore {
 
   setClipProps(
     clipId: string,
-    props: Partial<Pick<Clip, 'volumeDb' | 'speed' | 'fadeInSec' | 'fadeOutSec' | 'text' | 'name'>>,
+    props: Partial<Pick<Clip, 'volumeDb' | 'speed' | 'fadeInSec' | 'fadeOutSec' | 'text' | 'name' | 'scale' | 'posX' | 'posY' | 'cropL' | 'cropT' | 'cropR' | 'cropB'>>,
   ): OpResult<Clip> {
     const found = this.findClip(clipId);
     if (!found) return { ok: false, error: `Unknown clip ${clipId}` };
+    if (props.scale !== undefined && (!Number.isFinite(props.scale) || props.scale <= 0))
+      return { ok: false, error: 'scale must be a positive number' };
+    for (const k of ['posX', 'posY'] as const) {
+      if (props[k] !== undefined && !Number.isFinite(props[k]))
+        return { ok: false, error: `${k} must be a finite number` };
+    }
+    for (const k of ['cropL', 'cropT', 'cropR', 'cropB'] as const) {
+      if (props[k] !== undefined && (!Number.isFinite(props[k]) || props[k]! < 0 || props[k]! > 0.9))
+        return { ok: false, error: `${k} must be between 0 and 0.9` };
+    }
+    const merged = { ...found.clip, ...props };
+    if (merged.cropL + merged.cropR >= 1 || merged.cropT + merged.cropB >= 1)
+      return { ok: false, error: 'crop insets must leave a non-empty frame' };
     this.snapshot();
     Object.assign(found.clip, props);
     this.touch();
     return { ok: true, data: found.clip };
+  }
+
+  setAspect(aspect: string, width?: number, height?: number): OpResult {
+    if (!VALID_ASPECTS.has(aspect))
+      return { ok: false, error: `Unknown aspect ${aspect}` };
+    let customW = this.project.customW;
+    let customH = this.project.customH;
+    if (aspect === 'custom') {
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width! < 16 || height! < 16)
+        return { ok: false, error: 'custom aspect needs width/height >= 16' };
+      customW = Math.round(width!);
+      customH = Math.round(height!);
+    }
+    this.snapshot();
+    this.project.aspect = aspect as Project['aspect'];
+    this.project.customW = customW;
+    this.project.customH = customH;
+    this.touch();
+    return { ok: true };
   }
 
   addTrack(kind: TrackKind): OpResult<Track> {
@@ -384,6 +448,8 @@ export class ProjectStore {
           return this.deleteClip(op.clipId, op.ripple);
         case 'clip:setProps':
           return this.setClipProps(op.clipId, op);
+        case 'project:setAspect':
+          return this.setAspect(op.aspect, op.width, op.height);
         case 'track:add':
           return this.addTrack(op.kind);
         case 'track:delete':

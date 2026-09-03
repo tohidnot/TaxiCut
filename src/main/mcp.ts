@@ -8,6 +8,7 @@ import { z } from 'zod';
 import type { ProjectStore } from './store';
 import { probeMedia, mediaKind, makeThumbnail, exportProject } from './ffmpeg';
 import { transcribe, toSrt } from './asr';
+import { exportSize } from '../shared/types';
 import type { Clip, ExportJob, TranscriptSegment } from '../shared/types';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -35,11 +36,13 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
   const { store } = deps;
   const server = new McpServer({ name: 'taxicut', version: '0.1.0' });
 
-  server.tool('project_info', 'Get project name, file path, media count, tracks and total duration.', {},
+  server.tool('project_info', 'Get project name, file path, canvas aspect, media count, tracks and total duration.', {},
     async () => {
       const p = store.project;
+      const canvas = exportSize(p.aspect ?? '16:9', p.customW, p.customH);
       return ok({
         name: p.name, filePath: store.filePath, modified: p.modified,
+        aspect: p.aspect ?? '16:9', canvasWidth: canvas.width, canvasHeight: canvas.height,
         mediaCount: p.media.length, tracks: p.tracks.map((t) => ({ id: t.id, kind: t.kind, name: t.name, clips: t.clips.length })),
         durationSec: store.timelineDuration(),
       });
@@ -58,6 +61,17 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
     { path: z.string().optional() },
     async ({ path }) => {
       const r = await store.dispatch({ op: 'project:save', path });
+      return r.ok ? ok(r.data) : fail(r.error!);
+    });
+
+  server.tool('set_canvas_aspect', 'Set the canvas (output frame) aspect ratio used by preview and export. Use aspect "custom" with width/height for a custom size.',
+    {
+      aspect: z.enum(['16:9', '9:16', '1:1', '4:3', '4:5', 'custom']),
+      width: z.number().int().min(16).max(8192).optional(),
+      height: z.number().int().min(16).max(8192).optional(),
+    },
+    async ({ aspect, width, height }) => {
+      const r = await store.dispatch({ op: 'project:setAspect', aspect, width, height });
       return r.ok ? ok(r.data) : fail(r.error!);
     });
 
@@ -156,13 +170,20 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
       return r.ok ? ok(r.data) : fail(r.error!);
     });
 
-  server.tool('set_clip_properties', 'Set clip audio/playback properties.',
+  server.tool('set_clip_properties', 'Set clip audio/playback/transform/crop properties.',
     {
       clipId: z.string(),
       volumeDb: z.number().min(-60).max(12).optional(),
       speed: z.number().min(0.1).max(10).optional(),
       fadeInSec: z.number().min(0).optional(),
       fadeOutSec: z.number().min(0).optional(),
+      scale: z.number().positive().optional(),
+      posX: z.number().optional(),
+      posY: z.number().optional(),
+      cropL: z.number().min(0).max(0.9).optional(),
+      cropT: z.number().min(0).max(0.9).optional(),
+      cropR: z.number().min(0).max(0.9).optional(),
+      cropB: z.number().min(0).max(0.9).optional(),
     },
     async ({ clipId, ...props }) => {
       const r = await store.dispatch({ op: 'clip:setProps', clipId, ...props });

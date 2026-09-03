@@ -1,8 +1,15 @@
 import { useState } from 'react';
 import { useEditor, op } from '../store';
 import { formatDuration } from '../time';
+import { canvasSize } from '../../../shared/types';
 import type { Clip } from '../../../shared/types';
 import { IconPlus, IconSubtitles } from './Icons';
+
+const ALIGN_SPOTS = [
+  { id: 'tl', x: -1, y: -1 }, { id: 'tc', x: 0, y: -1 }, { id: 'tr', x: 1, y: -1 },
+  { id: 'ml', x: -1, y: 0 }, { id: 'c', x: 0, y: 0 }, { id: 'mr', x: 1, y: 0 },
+  { id: 'bl', x: -1, y: 1 }, { id: 'bc', x: 0, y: 1 }, { id: 'br', x: 1, y: 1 },
+] as const;
 
 export default function InspectorPanel() {
   const project = useEditor((s) => s.project);
@@ -10,12 +17,28 @@ export default function InspectorPanel() {
   const selectedMediaId = useEditor((s) => s.selectedMediaId);
   const playheadSec = useEditor((s) => s.playheadSec);
   const setPreviewMode = useEditor((s) => s.setPreviewMode);
+  const setCropMode = useEditor((s) => s.setCropMode);
+  const cropMode = useEditor((s) => s.cropMode);
   const [busy, setBusy] = useState(false);
 
   let clip: Clip | undefined;
   for (const t of project?.tracks ?? []) {
     clip = t.clips.find((c) => c.id === selectedClipId) ?? clip;
   }
+
+  const clipMedia = clip ? project?.media.find((m) => m.id === clip.mediaId) : undefined;
+  const canvas = canvasSize(project?.aspect ?? '16:9', project?.customW, project?.customH);
+  const mw = clipMedia?.width || 0;
+  const mh = clipMedia?.height || 0;
+  const fit0 = mw > 0 && mh > 0 ? Math.min(canvas.width / mw, canvas.height / mh) : 1;
+  const curScale = clip && Number.isFinite(clip.scale) && clip.scale > 0 ? clip.scale : 1;
+  // Displayed-size fractions at the current scale (for edge alignment).
+  const fw = mw > 0 ? (mw * fit0 * curScale) / canvas.width : 1;
+  const fh = mh > 0 ? (mh * fit0 * curScale) / canvas.height : 1;
+  const alignPos = (v: -1 | 0 | 1, f: number): number => (v === 0 ? 0 : (v * (1 - f)) / 2);
+  const fillScale = mw > 0 && mh > 0
+    ? Math.max(canvas.width / (mw * fit0), canvas.height / (mh * fit0))
+    : 1;
 
   const selectedMedia = selectedMediaId
     ? project?.media.find((m) => m.id === selectedMediaId)
@@ -121,6 +144,168 @@ export default function InspectorPanel() {
               <span>x</span>
             </div>
           </div>
+          {(clip.kind === 'video' || clip.kind === 'image') && (
+            <div>
+              <h3>TRANSFORM</h3>
+              <div className="insp-row">
+                <span>Scale</span>
+                <input
+                  type="range"
+                  min={0.1}
+                  max={4}
+                  step={0.05}
+                  value={clip.scale ?? 1}
+                  onChange={(e) => set({ scale: Number(e.target.value) })}
+                />
+                <span>{(clip.scale ?? 1).toFixed(2)}x</span>
+              </div>
+              <div className="insp-row">
+                <span>X</span>
+                <input
+                  type="number"
+                  step={0.05}
+                  value={clip.posX ?? 0}
+                  onChange={(e) => set({ posX: Number(e.target.value) })}
+                />
+                <span>Y</span>
+                <input
+                  type="number"
+                  step={0.05}
+                  value={clip.posY ?? 0}
+                  onChange={(e) => set({ posY: Number(e.target.value) })}
+                />
+              </div>
+              <div className="insp-row">
+                <button
+                  title="Fit whole video in canvas"
+                  style={{ flex: 1 }}
+                  onClick={() => set({ scale: 1, posX: 0, posY: 0 })}
+                >
+                  Fit
+                </button>
+                <button
+                  title="Fill the whole canvas (crops overflow)"
+                  style={{ flex: 1 }}
+                  onClick={() => set({ scale: Math.round(fillScale * 100) / 100, posX: 0, posY: 0 })}
+                >
+                  Fill
+                </button>
+                <button
+                  title="Center video on canvas"
+                  style={{ flex: 1 }}
+                  onClick={() => set({ posX: 0, posY: 0 })}
+                >
+                  Center
+                </button>
+              </div>
+              <div className="insp-row" style={{ alignItems: 'center' }}>
+                <span>Align</span>
+                <div className="align-grid">
+                  {ALIGN_SPOTS.map((a) => (
+                    <button
+                      key={a.id}
+                      className="align-btn"
+                      title={`Align ${a.id === 'c' ? 'center' : a.id}`}
+                      onClick={() => set({ posX: alignPos(a.x, fw), posY: alignPos(a.y, fh) })}
+                    >
+                      <span
+                        className="align-dot"
+                        style={{
+                          left: a.x === -1 ? 3 : a.x === 1 ? undefined : '50%',
+                          right: a.x === 1 ? 3 : undefined,
+                          top: a.y === -1 ? 3 : a.y === 1 ? undefined : '50%',
+                          bottom: a.y === 1 ? 3 : undefined,
+                          transform:
+                            a.x === 0 && a.y === 0
+                              ? 'translate(-50%,-50%)'
+                              : a.x === 0
+                                ? 'translateX(-50%)'
+                                : a.y === 0
+                                  ? 'translateY(-50%)'
+                                  : undefined,
+                        }}
+                      />
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="insp-row">
+                <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>
+                  Tip: drag the video in the viewer to move it, drag a corner to resize.
+                </span>
+              </div>
+              <button
+                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                onClick={() => set({ scale: 1, posX: 0, posY: 0 })}
+              >
+                Reset transform
+              </button>
+            </div>
+          )}
+          {(clip.kind === 'video' || clip.kind === 'image') && (
+            <div>
+              <h3>CROP (%)</h3>
+              <div className="insp-row">
+                <span>Left</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={90}
+                  step={1}
+                  value={Math.round((clip.cropL ?? 0) * 100)}
+                  onChange={(e) => set({ cropL: Number(e.target.value) / 100 })}
+                />
+                <span>Right</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={90}
+                  step={1}
+                  value={Math.round((clip.cropR ?? 0) * 100)}
+                  onChange={(e) => set({ cropR: Number(e.target.value) / 100 })}
+                />
+              </div>
+              <div className="insp-row">
+                <span>Top</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={90}
+                  step={1}
+                  value={Math.round((clip.cropT ?? 0) * 100)}
+                  onChange={(e) => set({ cropT: Number(e.target.value) / 100 })}
+                />
+                <span>Bottom</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={90}
+                  step={1}
+                  value={Math.round((clip.cropB ?? 0) * 100)}
+                  onChange={(e) => set({ cropB: Number(e.target.value) / 100 })}
+                />
+              </div>
+              <div className="insp-row">
+                <button
+                  title="Edit crop by dragging in the viewer"
+                  style={{ flex: 1 }}
+                  onClick={() => {
+                    setPreviewMode('timeline');
+                    setCropMode(!cropMode);
+                  }}
+                >
+                  {cropMode ? 'Exit viewer crop' : 'Crop in viewer'}
+                </button>
+                <button
+                  title="Remove crop"
+                  style={{ flex: 1 }}
+                  onClick={() => set({ cropL: 0, cropT: 0, cropR: 0, cropB: 0 })}
+                >
+                  Reset crop
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       ) : selectedMedia ? (
         <div className="body">

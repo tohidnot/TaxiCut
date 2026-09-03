@@ -4,7 +4,7 @@ import { stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import { homedir } from 'node:os';
-import { IPC, type MainOp, type OpResult } from '../shared/types';
+import { IPC, exportSize, type MainOp, type OpResult } from '../shared/types';
 import { ProjectStore } from './store';
 import { startMcpHttpServer } from './mcp';
 import { registerTerminalIpc } from './terminal';
@@ -58,7 +58,7 @@ function createWindow(): void {
 async function handleOp(op: MainOp): Promise<OpResult> {
   // store-level ops
   const storeOps = [
-    'project:get', 'project:new',
+    'project:get', 'project:new', 'project:setAspect',
     'timeline:addClip', 'timeline:moveClip', 'timeline:trimClip', 'timeline:splitClip',
     'timeline:deleteClip', 'clip:setProps', 'track:add', 'track:delete', 'track:setMute', 'track:setLock',
     'media:delete', 'history:undo', 'history:redo',
@@ -171,7 +171,10 @@ async function handleOp(op: MainOp): Promise<OpResult> {
       }
       const job: ExportJob = { id: randomUUID(), outPath, status: 'running', progress: 0 };
       exportJobs.set(job.id, job);
+      const { width, height } = exportSize(store.project.aspect ?? '16:9', store.project.customW, store.project.customH);
       exportProject(store.project, outPath, {
+        width,
+        height,
         onProgress: (f) => {
           job.progress = f;
           mainWindow?.webContents.send('taxicut:export-progress', job);

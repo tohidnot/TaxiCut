@@ -11,6 +11,7 @@ interface EditorState {
   playing: boolean;
   sourcePlayheadSec: number;
   sourcePlaying: boolean;
+  cropMode: boolean;
   pxPerSec: number;
   exportNote: string | null;
   setProject: (p: Project, filePath: string | null) => void;
@@ -21,6 +22,7 @@ interface EditorState {
   setPlaying: (playing: boolean) => void;
   setSourcePlayhead: (sec: number) => void;
   setSourcePlaying: (playing: boolean) => void;
+  setCropMode: (cropMode: boolean) => void;
   setZoom: (pxPerSec: number) => void;
   setExportNote: (note: string | null) => void;
 }
@@ -35,6 +37,7 @@ export const useEditor = create<EditorState>((set) => ({
   playing: false,
   sourcePlayheadSec: 0,
   sourcePlaying: false,
+  cropMode: false,
   pxPerSec: 60,
   exportNote: null,
   setProject: (project, filePath) => set({ project, filePath }),
@@ -46,6 +49,7 @@ export const useEditor = create<EditorState>((set) => ({
   setPlaying: (playing) => set({ playing }),
   setSourcePlayhead: (sourcePlayheadSec) => set({ sourcePlayheadSec }),
   setSourcePlaying: (sourcePlaying) => set({ sourcePlaying }),
+  setCropMode: (cropMode) => set({ cropMode }),
   setZoom: (pxPerSec) => set({ pxPerSec }),
   setExportNote: (exportNote) => set({ exportNote }),
 }));
