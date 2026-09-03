@@ -1,7 +1,7 @@
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { useEditor, op } from '../store';
 import { formatTimecode } from '../time';
-import type { Clip, MediaKind, Track } from '../../../shared/types';
+import type { Clip, Track, TrackKind } from '../../../shared/types';
 import {
   IconUndo,
   IconRedo,
@@ -48,10 +48,32 @@ export default function TimelinePanel() {
   const [activeDrag, setActiveDrag] = useState<DragState | null>(null);
   const [snapTime, setSnapTime] = useState<number | null>(null);
   const [dragOverTrackId, setDragOverTrackId] = useState<string | null>(null);
+  const [willCreateLayer, setWillCreateLayer] = useState(false);
   const [isHoveringNewLayer, setIsHoveringNewLayer] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; clip: Clip; track: Track } | null>(null);
 
   const tracks = project?.tracks ?? [];
+  // Display order: top video layer first (array end = foreground), then audio.
+  // DOM order no longer matches array order — always map lanes via data-track-id.
+  const displayTracks = useMemo(() => {
+    const video = tracks.filter((t) => t.kind === 'video').reverse();
+    const audio = tracks.filter((t) => t.kind === 'audio');
+    return [...video, ...audio];
+  }, [tracks]);
+  // Legacy same-track overlaps (the store now auto-layers instead): flag them red.
+  const overlapIds = useMemo(() => {
+    const bad = new Set<string>();
+    for (const t of tracks) {
+      const cs = [...t.clips].sort((a, b) => a.startSec - b.startSec);
+      for (let i = 1; i < cs.length; i++) {
+        if (cs[i].startSec < cs[i - 1].startSec + cs[i - 1].durationSec - 1e-6) {
+          bad.add(cs[i].id);
+          bad.add(cs[i - 1].id);
+        }
+      }
+    }
+    return bad;
+  }, [tracks]);
   const duration = Math.max(
     30,
     ...tracks.flatMap((t) => t.clips.map((c) => c.startSec + c.durationSec + 10)),
@@ -151,18 +173,18 @@ export default function TimelinePanel() {
 
         // Determine if hovering over an existing track or dragging above for a new upper layer
         if (lanesRef.current) {
-          const lanes = Array.from(lanesRef.current.children) as HTMLElement[];
+          const lanes = Array.from(lanesRef.current.querySelectorAll('[data-track-id]')) as HTMLElement[];
           const lanesContainerRect = lanesRef.current.getBoundingClientRect();
 
-          // If dragging upward above the top video track:
-          if (sourceTrack.kind === 'video' && ev.clientY < lanesContainerRect.top) {
+          // Dragging upward above the topmost lane creates a new upper layer.
+          if (ev.clientY < lanesContainerRect.top) {
             isNewLayer = true;
           } else {
             isNewLayer = false;
-            for (let i = 0; i < lanes.length; i++) {
-              const laneRect = lanes[i].getBoundingClientRect();
+            for (const lane of lanes) {
+              const laneRect = lane.getBoundingClientRect();
               if (ev.clientY >= laneRect.top && ev.clientY <= laneRect.bottom) {
-                const t = tracks[i];
+                const t = tracks.find((tr) => tr.id === lane.dataset.trackId);
                 if (t && t.kind === sourceTrack.kind && !t.locked) {
                   currentTargetTrackId = t.id;
                 }
@@ -213,9 +235,9 @@ export default function TimelinePanel() {
       if (mode === 'move') {
         const newStart = Math.max(0, clip.startSec + currentDelta);
 
-        if (isNewLayer && sourceTrack.kind === 'video') {
+        if (isNewLayer) {
           // Auto-create a new upper layer track and move clip onto it
-          const r = await op({ op: 'track:add', kind: 'video' });
+          const r = await op({ op: 'track:add', kind: sourceTrack.kind });
           if (r.ok && r.data) {
             const newTrack = r.data as Track;
             await op({
@@ -249,45 +271,78 @@ export default function TimelinePanel() {
     window.addEventListener('pointerup', onUp);
   };
 
-  // Helper to resolve the best track for any imported media item
-  const findOrCreateTrack = async (mediaKind: MediaKind, preferredTrack?: Track): Promise<string> => {
-    const kind = mediaKind === 'audio' ? 'audio' : 'video';
-    if (preferredTrack && preferredTrack.kind === kind && !preferredTrack.locked) {
+  // Client mirror of the store's layer rule: two clips on the same track
+  // never overlap. Prefer the hovered track when the range is free, else the
+  // first unlocked track with room, else create a new layer track.
+  const trackHasRoom = (t: Track, start: number, dur: number): boolean =>
+    !t.clips.some(
+      (c) => start < c.startSec + c.durationSec - 1e-6 && c.startSec < start + dur - 1e-6,
+    );
+
+  const findRoomTrack = async (
+    kind: TrackKind,
+    start: number,
+    dur: number,
+    preferredTrack?: Track,
+  ): Promise<string> => {
+    if (
+      preferredTrack && preferredTrack.kind === kind && !preferredTrack.locked &&
+      trackHasRoom(preferredTrack, start, dur)
+    ) {
       return preferredTrack.id;
     }
-    // Find first unlocked matching track
-    const found = tracks.find((t) => t.kind === kind && !t.locked);
-    if (found) return found.id;
-    // Otherwise create one
+    const free = tracks.find((t) => t.kind === kind && !t.locked && trackHasRoom(t, start, dur));
+    if (free) return free.id;
     const r = await op({ op: 'track:add', kind });
-    if (r.ok && r.data) {
-      return (r.data as Track).id;
-    }
+    if (r.ok && r.data) return (r.data as Track).id;
     return tracks[0]?.id ?? '';
+  };
+
+  // "Will create layer" hint while dragging over an occupied lane region.
+  const updateLayerHint = (t: Track, e: React.DragEvent) => {
+    const probe = secFromEvent(e);
+    setWillCreateLayer(t.clips.some((c) => probe >= c.startSec && probe < c.startSec + c.durationSec));
   };
 
   const handleTrackDrop = async (e: React.DragEvent, targetTrack?: Track, forceNewLayer = false) => {
     e.preventDefault();
     e.stopPropagation();
     setDragOverTrackId(null);
+    setWillCreateLayer(false);
     setIsHoveringNewLayer(false);
     setPreviewMode('timeline');
 
     const startSec = secFromEvent(e);
 
-    // 1) From Library
-    const mediaId = e.dataTransfer.getData('application/x-taxicut-media');
-    if (mediaId) {
-      const asset = project?.media.find((m) => m.id === mediaId);
-      if (asset) {
+    // 1) From Library (single id, or JSON array for multi-drag)
+    const rawMedia = e.dataTransfer.getData('application/x-taxicut-media');
+    if (rawMedia) {
+      let ids: string[] = [];
+      try {
+        const parsed: unknown = JSON.parse(rawMedia);
+        ids = Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [rawMedia];
+      } catch {
+        ids = [rawMedia];
+      }
+      // Chain multiple items end-to-end (video and audio chains separately).
+      let curV = startSec;
+      let curA = startSec;
+      for (const mediaId of ids) {
+        const asset = project?.media.find((m) => m.id === mediaId);
+        if (!asset) continue;
+        const kind: TrackKind = asset.kind === 'audio' ? 'audio' : 'video';
+        const dur = asset.kind === 'image' ? 5 : asset.durationSec || 5;
+        const at = kind === 'audio' ? curA : curV;
         let destTrackId = targetTrack?.id;
         if (forceNewLayer) {
-          const r = await op({ op: 'track:add', kind: asset.kind === 'audio' ? 'audio' : 'video' });
+          const r = await op({ op: 'track:add', kind });
           if (r.ok && r.data) destTrackId = (r.data as Track).id;
         } else {
-          destTrackId = await findOrCreateTrack(asset.kind, targetTrack);
+          destTrackId = await findRoomTrack(kind, at, dur, targetTrack);
         }
-        await op({ op: 'timeline:addClip', mediaId, trackId: destTrackId, startSec });
+        await op({ op: 'timeline:addClip', mediaId, trackId: destTrackId, startSec: at });
+        if (kind === 'audio') curA += dur;
+        else curV += dur;
       }
       return;
     }
@@ -304,15 +359,17 @@ export default function TimelinePanel() {
         if (r.ok && Array.isArray(r.data)) {
           let curStart = startSec;
           for (const asset of r.data as { id: string; kind: 'video' | 'audio' | 'image'; durationSec: number }[]) {
+            const kind: TrackKind = asset.kind === 'audio' ? 'audio' : 'video';
+            const dur = asset.kind === 'image' ? 5 : asset.durationSec || 5;
             let destTrackId: string;
             if (forceNewLayer) {
-              const tr = await op({ op: 'track:add', kind: asset.kind === 'audio' ? 'audio' : 'video' });
-              destTrackId = tr.ok && tr.data ? (tr.data as Track).id : await findOrCreateTrack(asset.kind, targetTrack);
+              const tr = await op({ op: 'track:add', kind });
+              destTrackId = tr.ok && tr.data ? (tr.data as Track).id : await findRoomTrack(kind, curStart, dur, targetTrack);
             } else {
-              destTrackId = await findOrCreateTrack(asset.kind, targetTrack);
+              destTrackId = await findRoomTrack(kind, curStart, dur, targetTrack);
             }
             await op({ op: 'timeline:addClip', mediaId: asset.id, trackId: destTrackId, startSec: curStart });
-            curStart += asset.durationSec || 5;
+            curStart += dur;
           }
         }
       }
@@ -427,9 +484,21 @@ export default function TimelinePanel() {
               + New Layer
             </div>
           )}
-          {tracks.map((t) => (
-            <div className="track-header" key={t.id}>
-              <b>{t.name}</b>
+          {displayTracks.map((t) => {
+            const siblings = t.kind === 'video'
+              ? tracks.filter((x) => x.kind === 'video')
+              : tracks.filter((x) => x.kind === 'audio');
+            const num = siblings.findIndex((x) => x.id === t.id) + 1;
+            const chip = `${t.kind === 'video' ? 'V' : 'A'}${num}`;
+            const layerTip = t.kind !== 'video'
+              ? `${t.name} · audio layer`
+              : siblings.findIndex((x) => x.id === t.id) === siblings.length - 1
+                ? `${t.name} · top video layer (foreground)`
+                : `${t.name} · video layer below ${siblings[siblings.findIndex((x) => x.id === t.id) + 1]?.name}`;
+            return (
+            <div className="track-header" key={t.id} title={layerTip}>
+              <span className={`track-kind-chip ${t.kind}`}>{chip}</span>
+              {t.name !== chip && <b className="track-name">{t.name}</b>}
               <div className="track-actions">
                 <button
                   className={`track-action-btn ${t.muted ? 'active' : ''}`}
@@ -464,7 +533,8 @@ export default function TimelinePanel() {
                 )}
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
 
         <div
@@ -518,20 +588,28 @@ export default function TimelinePanel() {
             )}
 
             <div ref={lanesRef}>
-              {tracks.map((t) => {
+              {displayTracks.map((t) => {
                 const isDragTarget = activeDrag?.targetTrackId === t.id;
 
                 return (
                   <div
-                    className={`track-lane ${dragOverTrackId === t.id ? 'drag-over' : ''}`}
+                    className={`track-lane ${t.kind} ${dragOverTrackId === t.id ? 'drag-over' : ''}`}
                     key={t.id}
+                    data-track-id={t.id}
                     onDragOver={(e) => {
                       e.preventDefault();
                       setDragOverTrackId(t.id);
+                      updateLayerHint(t, e);
                     }}
-                    onDragLeave={() => setDragOverTrackId(null)}
+                    onDragLeave={() => {
+                      setDragOverTrackId(null);
+                      setWillCreateLayer(false);
+                    }}
                     onDrop={(e) => handleTrackDrop(e, t)}
                   >
+                    {dragOverTrackId === t.id && willCreateLayer && (
+                      <span className="layer-will-create">＋ new layer (occupied)</span>
+                    )}
                     {t.clips.map((c) => {
                       const media = project?.media.find((m) => m.id === c.mediaId);
                       const thumbUrl = media?.thumbnailPath ? window.taxicut.mediaUrl(media.thumbnailPath) : null;
@@ -558,13 +636,15 @@ export default function TimelinePanel() {
                       return (
                         <div
                           key={c.id}
-                          className={`clip ${t.kind} ${c.kind === 'text' ? 'text' : ''} ${c.id === selectedId ? 'selected' : ''}`}
+                          className={`clip ${c.kind} ${c.id === selectedId ? 'selected' : ''} ${overlapIds.has(c.id) ? 'overlap' : ''}`}
                           style={{
                             left: liveStart * pxPerSec,
                             width: clipWidth,
                             opacity: t.locked ? 0.6 : 1,
                           }}
-                          title={`${c.name} (${formatTimecode(c.durationSec).slice(3)})`}
+                          title={overlapIds.has(c.id)
+                            ? `${c.name} (${formatTimecode(c.durationSec).slice(3)}) — overlaps a sibling; drag it to a free layer`
+                            : `${c.name} (${formatTimecode(c.durationSec).slice(3)})`}
                           onPointerDown={(e) => onClipPointerDown(e, c, t, 'move')}
                           onContextMenu={(e) => {
                             e.preventDefault();

@@ -26,10 +26,30 @@ export default function MediaPanel() {
   const [busyMessage, setBusyMessage] = useState('');
   const [isDragOver, setIsDragOver] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; media: MediaAsset } | null>(null);
+  // Multi-select for batch timeline inserts (checkbox / Cmd-click / Shift-click).
+  const [checked, setChecked] = useState<string[]>([]);
+  const [anchorId, setAnchorId] = useState<string | null>(null);
 
   const media = (project?.media ?? []).filter((m) =>
     m.name.toLowerCase().includes(query.toLowerCase()),
   );
+  const checkedSet = new Set(checked);
+  const checkedMedia = media.filter((m) => checkedSet.has(m.id));
+
+  const toggleCheck = (id: string, range: boolean) => {
+    if (range && anchorId) {
+      const ids = media.map((m) => m.id);
+      const a = ids.indexOf(anchorId);
+      const b = ids.indexOf(id);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        setChecked(ids.slice(lo, hi + 1));
+        return;
+      }
+    }
+    setChecked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+    setAnchorId(id);
+  };
 
   const importMedia = () => op({ op: 'media:import' });
 
@@ -43,6 +63,25 @@ export default function MediaPanel() {
   const addClipAtPlayhead = (mediaId: string) => {
     setPreviewMode('timeline');
     op({ op: 'timeline:addClip', mediaId, startSec: playheadSec });
+  };
+
+  // Batch insert: selected items laid end-to-end from the playhead.
+  // Video/images chain on video layers, audio chains on audio layers.
+  const addCheckedToTimeline = async () => {
+    if (checkedMedia.length === 0) return;
+    setPreviewMode('timeline');
+    let curV = playheadSec;
+    let curA = playheadSec;
+    for (const m of checkedMedia) {
+      const dur = m.kind === 'image' ? 5 : m.durationSec || 5;
+      if (m.kind === 'audio') {
+        await op({ op: 'timeline:addClip', mediaId: m.id, startSec: curA });
+        curA += dur;
+      } else {
+        await op({ op: 'timeline:addClip', mediaId: m.id, startSec: curV });
+        curV += dur;
+      }
+    }
   };
 
   const transcribe = async (m: MediaAsset) => {
@@ -84,6 +123,16 @@ export default function MediaPanel() {
     >
       <div className="panel-header">
         <span>Media Library</span>
+        {checkedMedia.length > 0 && (
+          <button
+            className="accent"
+            onClick={addCheckedToTimeline}
+            title={`Add ${checkedMedia.length} selected item(s) to the timeline, end-to-end from the playhead`}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
+          >
+            <IconPlus size={12} /> Timeline ({checkedMedia.length})
+          </button>
+        )}
         <button onClick={importMedia} title="Import video, audio, or images" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
           <IconUpload size={12} /> Import…
         </button>
@@ -116,13 +165,21 @@ export default function MediaPanel() {
         {media.map((m) => (
           <div
             key={m.id}
-            className={`media-card ${selectedMediaId === m.id ? 'selected' : ''}`}
+            className={`media-card ${selectedMediaId === m.id ? 'selected' : ''} ${checkedSet.has(m.id) ? 'checked' : ''}`}
             draggable
             title={`${m.name} (${m.path})`}
             onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-taxicut-media', m.id);
+              const ids = checkedSet.has(m.id) && checked.length > 0 ? checked : [m.id];
+              e.dataTransfer.setData('application/x-taxicut-media', JSON.stringify(ids));
             }}
-            onClick={() => selectMedia(m.id)}
+            onClick={(e) => {
+              if (e.metaKey || e.ctrlKey || e.shiftKey) toggleCheck(m.id, e.shiftKey);
+              else {
+                selectMedia(m.id);
+                setChecked([m.id]);
+                setAnchorId(m.id);
+              }
+            }}
             onDoubleClick={() => addClipAtPlayhead(m.id)}
             onContextMenu={(e) => {
               e.preventDefault();
@@ -130,6 +187,14 @@ export default function MediaPanel() {
               setContextMenu({ x: e.clientX, y: e.clientY, media: m });
             }}
           >
+            <input
+              type="checkbox"
+              className="media-check"
+              checked={checkedSet.has(m.id)}
+              title="Select for batch add (Cmd-click / Shift-click works too)"
+              onChange={() => toggleCheck(m.id, false)}
+              onClick={(e) => e.stopPropagation()}
+            />
             <div className="media-actions">
               <button
                 className="media-action-btn"

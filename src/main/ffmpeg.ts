@@ -6,7 +6,7 @@ import { tmpdir, homedir } from 'node:os';
 import { join, basename } from 'node:path';
 import { promisify } from 'node:util';
 import type { Clip, MediaAsset, Project, Track } from '../shared/types';
-import { clipFilterById } from '../shared/types';
+import { clipColorFf, clipFilterById } from '../shared/types';
 
 const run = promisify(execFile);
 
@@ -100,9 +100,82 @@ const evenDown = (v: number, limit: number): number => {
 };
 
 /**
- * Video filter mapping a clip onto the W×H canvas, mirroring the preview:
+ * Shared canvas geometry for a clip on a W×H canvas, mirroring the preview:
  * source crop, then contain-fit base, then user scale (multiplier) and x/y
- * offset (fractions of canvas size, 0 = centered). Identity settings keep
+ * offset (fractions of canvas size, 0 = centered). The full-frame filter
+ * (clipVideoFilter) and the layer overlay builder (clipOverlayGeom) both
+ * derive from this so preview, export base, and export overlays agree.
+ */
+interface ClipGeom {
+  /** Source-space crop filter (null when none). */
+  srcCrop: string | null;
+  /** Display size after contain-fit × user scale (before centering crop). */
+  dw: number;
+  dh: number;
+  /** Size after the centering crop (what actually lands on the canvas). */
+  cw: number;
+  ch: number;
+  cx: number;
+  cy: number;
+  /** Canvas position of the top-left corner (pad offsets). */
+  px: number;
+  py: number;
+  centerCrop: boolean;
+  pad: boolean;
+  identity: boolean;
+}
+
+function clipGeom(
+  media: MediaAsset | undefined,
+  clip: Clip,
+  W: number,
+  H: number,
+): ClipGeom {
+  const s = Number.isFinite(clip.scale) && clip.scale > 0 ? clip.scale : 1;
+  const ox = Number.isFinite(clip.posX) ? clip.posX : 0;
+  const oy = Number.isFinite(clip.posY) ? clip.posY : 0;
+  const cl = Number.isFinite(clip.cropL) ? clip.cropL : 0;
+  const ct = Number.isFinite(clip.cropT) ? clip.cropT : 0;
+  const cr = Number.isFinite(clip.cropR) ? clip.cropR : 0;
+  const cb = Number.isFinite(clip.cropB) ? clip.cropB : 0;
+  let mw = media && media.width > 0 ? media.width : 0;
+  let mh = media && media.height > 0 ? media.height : 0;
+  let srcCrop: string | null = null;
+  if ((cl > 0 || ct > 0 || cr > 0 || cb > 0) && mw > 0 && mh > 0 && cl + cr < 1 && ct + cb < 1) {
+    const cwS = evenDown(mw * (1 - cl - cr), mw);
+    const chS = evenDown(mh * (1 - ct - cb), mh);
+    const cxS = clampInt(mw * cl, 0, mw - cwS) & ~1;
+    const cyS = clampInt(mh * ct, 0, mh - chS) & ~1;
+    srcCrop = `crop=${cwS}:${chS}:${cxS}:${cyS}`;
+    mw = cwS;
+    mh = chS;
+  }
+  const identity = (Math.abs(s - 1) < 1e-6 && ox === 0 && oy === 0) || mw === 0 || mh === 0;
+  if (identity) {
+    return { srcCrop, dw: 0, dh: 0, cw: 0, ch: 0, cx: 0, cy: 0, px: 0, py: 0, centerCrop: false, pad: false, identity: true };
+  }
+  const f = Math.min(W / mw, H / mh);
+  const dw = evenUp(mw * f * s);
+  const dh = evenUp(mh * f * s);
+  let cw = dw;
+  let ch = dh;
+  let cx = 0;
+  let cy = 0;
+  let centerCrop = false;
+  if (dw > W || dh > H) {
+    centerCrop = true;
+    cw = evenDown(Math.min(dw, W), dw);
+    ch = evenDown(Math.min(dh, H), dh);
+    cx = clampInt((dw - cw) / 2 - ox * W, 0, dw - cw) & ~1;
+    cy = clampInt((dh - ch) / 2 - oy * H, 0, dh - ch) & ~1;
+  }
+  const pad = cw < W || ch < H;
+  const px = clampInt((W - cw) / 2 + ox * W, 0, W - cw);
+  const py = clampInt((H - ch) / 2 + oy * H, 0, H - ch);
+  return { srcCrop, dw, dh, cw, ch, cx, cy, px, py, centerCrop, pad, identity: false };
+}
+/**
+ * Video filter mapping a clip onto the W×H canvas. Identity settings keep
  * the legacy filter.
  */
 export function clipVideoFilter(
@@ -113,56 +186,58 @@ export function clipVideoFilter(
   FPS: number,
 ): string {
   const tail = `setsar=1,fps=${FPS},format=yuv420p`;
-  const s = Number.isFinite(clip.scale) && clip.scale > 0 ? clip.scale : 1;
-  const ox = Number.isFinite(clip.posX) ? clip.posX : 0;
-  const oy = Number.isFinite(clip.posY) ? clip.posY : 0;
-  const cl = Number.isFinite(clip.cropL) ? clip.cropL : 0;
-  const ct = Number.isFinite(clip.cropT) ? clip.cropT : 0;
-  const cr = Number.isFinite(clip.cropR) ? clip.cropR : 0;
-  const cb = Number.isFinite(clip.cropB) ? clip.cropB : 0;
-  let mw = media && media.width > 0 ? media.width : 0;
-  let mh = media && media.height > 0 ? media.height : 0;
   const filt = clipFilterById(clip.filter).ff;
+  const colFf = clipColorFf(clip.color);
+  const grade = [filt, colFf].filter(Boolean).join(',');
+  const g = clipGeom(media, clip, W, H);
   const parts: string[] = [];
-  if ((cl > 0 || ct > 0 || cr > 0 || cb > 0) && mw > 0 && mh > 0 && cl + cr < 1 && ct + cb < 1) {
-    const cwS = evenDown(mw * (1 - cl - cr), mw);
-    const chS = evenDown(mh * (1 - ct - cb), mh);
-    const cxS = clampInt(mw * cl, 0, mw - cwS) & ~1;
-    const cyS = clampInt(mh * ct, 0, mh - chS) & ~1;
-    parts.push(`crop=${cwS}:${chS}:${cxS}:${cyS}`);
-    mw = cwS;
-    mh = chS;
-  }
-  if ((Math.abs(s - 1) < 1e-6 && ox === 0 && oy === 0) || mw === 0 || mh === 0) {
-    if (parts.length === 0 && !filt) {
+  if (g.srcCrop) parts.push(g.srcCrop);
+  if (g.identity) {
+    if (parts.length === 0 && !grade) {
       return `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,${tail}`;
     }
     parts.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black`);
-    if (filt) parts.push(filt);
-    parts.push(tail);
-    return parts.join(',');
+  } else {
+    parts.push(`scale=${g.dw}:${g.dh}`);
+    if (g.centerCrop) parts.push(`crop=${g.cw}:${g.ch}:${g.cx}:${g.cy}`);
+    if (g.pad) parts.push(`pad=${W}:${H}:${g.px}:${g.py}:black`);
   }
-  const f = Math.min(W / mw, H / mh);
-  const dw = evenUp(mw * f * s);
-  const dh = evenUp(mh * f * s);
-  parts.push(`scale=${dw}:${dh}`);
-  let cw = dw;
-  let ch = dh;
-  if (dw > W || dh > H) {
-    cw = evenDown(Math.min(dw, W), dw);
-    ch = evenDown(Math.min(dh, H), dh);
-    const cx = clampInt((dw - cw) / 2 - ox * W, 0, dw - cw) & ~1;
-    const cy = clampInt((dh - ch) / 2 - oy * H, 0, dh - ch) & ~1;
-    parts.push(`crop=${cw}:${ch}:${cx}:${cy}`);
-  }
-  if (cw < W || ch < H) {
-    const px = clampInt((W - cw) / 2 + ox * W, 0, W - cw);
-    const py = clampInt((H - ch) / 2 + oy * H, 0, H - ch);
-    parts.push(`pad=${W}:${H}:${px}:${py}:black`);
-  }
-  if (filt) parts.push(filt);
+  if (grade) parts.push(grade);
   parts.push(tail);
   return parts.join(',');
+}
+
+/**
+ * Overlay geometry for upper-layer video/image clips (V2+): the same display
+ * size/position as clipVideoFilter but without the canvas pad — the caller
+ * positions it with the overlay filter at (x, y).
+ */
+export function clipOverlayGeom(
+  media: MediaAsset | undefined,
+  clip: Clip,
+  W: number,
+  H: number,
+  FPS: number,
+): { filter: string; x: string; y: string } {
+  const tail = `setsar=1,fps=${FPS},format=yuv420p`;
+  const filt = clipFilterById(clip.filter).ff;
+  const colFf = clipColorFf(clip.color);
+  const grade = [filt, colFf].filter(Boolean).join(',');
+  const g = clipGeom(media, clip, W, H);
+  const parts: string[] = [];
+  if (g.srcCrop) parts.push(g.srcCrop);
+  if (g.identity) {
+    parts.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease`);
+    if (grade) parts.push(grade);
+    parts.push(tail);
+    // Even-forced: yuv420p overlay positions must be multiples of 2.
+    return { filter: parts.join(','), x: 'trunc((W-w)/4)*2', y: 'trunc((H-h)/4)*2' };
+  }
+  parts.push(`scale=${g.dw}:${g.dh}`);
+  if (g.centerCrop) parts.push(`crop=${g.cw}:${g.ch}:${g.cx}:${g.cy}`);
+  if (grade) parts.push(grade);
+  parts.push(tail);
+  return { filter: parts.join(','), x: String(g.px & ~1), y: String(g.py & ~1) };
 }
 
 /** #rrggbb/#rgb -> [r, g, b] for the PNG renderer (null when not hex). */
@@ -361,6 +436,11 @@ export async function exportProject(
 
   const dir = await mkdtemp(join(tmpdir(), 'taxicut-export-'));
   const mediaById = new Map(project.media.map((m) => [m.id, m]));
+  // Upper-layer video/image clips (V2+): composited over the base picture.
+  const overlayClips = unmutedVideoTracks.slice(1)
+    .flatMap((t) => t.clips)
+    .filter((c) => c.kind !== 'text' && mediaById.get(c.mediaId))
+    .sort((a, b) => a.startSec - b.startSec);
   try {
     const vf = `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${FPS},format=yuv420p`;
     const segments: string[] = [];
@@ -469,6 +549,42 @@ export async function exportProject(
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(opts.crf ?? 18),
         '-c:a', 'aac', '-ar', '48000', '-ac', '2', textOut]);
       pictureSrc = textOut;
+    }
+
+    // 2c) composite upper-layer video/image clips over the picture.
+    // Each overlay keeps its canvas transform (scale/pos/crop/filter/grade).
+    if (overlayClips.length > 0) {
+      const overOut = join(dir, 'overlay.mp4');
+      const inputs: string[] = ['-i', pictureSrc];
+      const parts: string[] = [];
+      let label = '0:v';
+      overlayClips.forEach((clip, i) => {
+        const media = mediaById.get(clip.mediaId);
+        if (!media) return;
+        const end = clip.startSec + clip.durationSec;
+        const n = i + 1;
+        if (media.kind === 'image') {
+          inputs.push('-loop', '1', '-t', clip.durationSec.toFixed(3), '-i', media.path);
+        } else {
+          inputs.push('-ss', clip.inSec.toFixed(3), '-t', clip.durationSec.toFixed(3), '-i', media.path);
+        }
+        const g = clipOverlayGeom(media, clip, W, H, FPS);
+        const ov = `ov${n}`;
+        parts.push(`[${n}:v]${g.filter}[${ov}]`);
+        const out = i === overlayClips.length - 1 ? 'vout' : `v${n}`;
+        parts.push(
+          `[${label}][${ov}]overlay=${g.x}:${g.y}` +
+          `:enable='between(t,${clip.startSec.toFixed(3)},${end.toFixed(3)})'[${out}]`,
+        );
+        label = out;
+        // Overlay clips with sound join the audio mix below.
+        if (media.hasAudio && media.kind !== 'image') audioClips.push(clip);
+      });
+      await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', ...inputs,
+        '-filter_complex', parts.join(';'), '-map', '[vout]', '-map', '0:a',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(opts.crf ?? 18),
+        '-c:a', 'aac', '-ar', '48000', '-ac', '2', overOut]);
+      pictureSrc = overOut;
     }
 
     // 3) mix standalone audio clips (from audio tracks) over the concat result

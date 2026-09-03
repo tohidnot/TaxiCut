@@ -5,6 +5,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type {
   Clip,
+  ClipColor,
   MainOp,
   MediaAsset,
   OpResult,
@@ -12,7 +13,7 @@ import type {
   Track,
   TrackKind,
 } from '../shared/types';
-import { CLIP_FILTERS, textTemplateById } from '../shared/types';
+import { CLIP_FILTERS, DEFAULT_CLIP_COLOR, normClipColor, textTemplateById } from '../shared/types';
 
 export interface StoreListener {
   (project: Project, filePath: string | null): void;
@@ -38,6 +39,7 @@ function migrateProject(p: Project): void {
       if (c.cropL + c.cropR >= 1) { c.cropL = 0; c.cropR = 0; }
       if (c.cropT + c.cropB >= 1) { c.cropT = 0; c.cropB = 0; }
       if (typeof c.filter !== 'string') c.filter = '';
+      c.color = normClipColor((c as { color?: Partial<ClipColor> }).color);
       if (c.kind === 'text') {
         if (typeof c.text !== 'string') c.text = 'Text';
         if (typeof c.fontFamily !== 'string' || !c.fontFamily) c.fontFamily = 'Arial';
@@ -182,6 +184,70 @@ export class ProjectStore {
     return { ok: true, data: { removed: mediaId } };
   }
 
+  // ---------- layered tracks: clips on the SAME track never overlap ----------
+  /** Half-open range overlap test. Touching edges are fine. */
+  private static rangesOverlap(a0: number, a1: number, b0: number, b1: number): boolean {
+    return a0 < b1 - 1e-6 && b0 < a1 - 1e-6;
+  }
+
+  /** True when [start, start+dur) touches no other clip on the track. */
+  trackHasRoom(track: Track, start: number, dur: number, excludeClipId?: string): boolean {
+    const end = start + dur;
+    return !track.clips.some(
+      (c) => c.id !== excludeClipId &&
+        ProjectStore.rangesOverlap(start, end, c.startSec, c.startSec + c.durationSec),
+    );
+  }
+
+  /** Insert a track without snapshotting (caller owns the undo snapshot). */
+  private insertTrack(kind: TrackKind): Track {
+    let maxN = 0;
+    for (const t of this.project.tracks) {
+      if (t.kind !== kind) continue;
+      const m = /^([VA])(\d+)$/.exec(t.name);
+      if (m) maxN = Math.max(maxN, parseInt(m[2], 10));
+    }
+    const track: Track = {
+      id: randomUUID(),
+      kind,
+      name: `${kind === 'video' ? 'V' : 'A'}${maxN + 1}`,
+      muted: false,
+      locked: false,
+      clips: [],
+    };
+    // Video layers stack above V1 (end of array = top layer); audio appends at the end.
+    const idx = this.project.tracks.findLastIndex((t) => t.kind === kind);
+    this.project.tracks.splice(idx + 1, 0, track);
+    return track;
+  }
+
+  /**
+   * Resolve the layer for a [start, dur) range: prefer the requested track,
+   * else the first unlocked same-kind track with room, else auto-create a new
+   * layer. Always returns a track with room (a locked preferred track is
+   * treated as no preference — locked tracks are never modified).
+   */
+  private resolveLayer(
+    wantKind: TrackKind,
+    start: number,
+    dur: number,
+    preferredTrackId?: string,
+    excludeClipId?: string,
+  ): Track {
+    const byId = preferredTrackId
+      ? this.project.tracks.find((t) => t.id === preferredTrackId)
+      : undefined;
+    if (byId && byId.kind === wantKind && !byId.locked &&
+      this.trackHasRoom(byId, start, dur, excludeClipId)) {
+      return byId;
+    }
+    const free = this.project.tracks.find(
+      (t) => t.kind === wantKind && !t.locked && this.trackHasRoom(t, start, dur, excludeClipId),
+    );
+    if (free) return free;
+    return this.insertTrack(wantKind);
+  }
+
   // ---------- timeline mutations ----------
   addClip(input: {
     mediaId: string;
@@ -196,11 +262,6 @@ export class ProjectStore {
     const media = this.media(input.mediaId);
     if (!media) return { ok: false, error: `Unknown media ${input.mediaId}` };
     const wantKind: TrackKind = media.kind === 'audio' ? 'audio' : 'video';
-    let track = input.trackId
-      ? this.project.tracks.find((t) => t.id === input.trackId)
-      : this.project.tracks.find((t) => t.kind === wantKind);
-    if (!track || track.kind !== wantKind)
-      return { ok: false, error: `No ${wantKind} track available` };
     const inSec = Math.max(0, input.inSec ?? 0);
     if (media.kind !== 'image' && inSec >= media.durationSec)
       return { ok: false, error: 'inSec beyond media duration' };
@@ -208,8 +269,13 @@ export class ProjectStore {
       media.kind === 'image' ? 5.0 : media.durationSec - inSec;
     const defaultDur = media.kind === 'image' ? 5.0 : sourceAvail;
     const durationSec = Math.max(0.1, Math.min(input.durationSec ?? defaultDur, media.kind === 'image' ? 3600 : sourceAvail));
-    const trackEnd = track.clips.reduce((e, c) => Math.max(e, c.startSec + c.durationSec), 0);
-    const startSec = Math.max(0, input.startSec ?? trackEnd);
+    const preferred = input.trackId
+      ? this.project.tracks.find((t) => t.id === input.trackId)
+      : this.project.tracks.find((t) => t.kind === wantKind);
+    const fallbackEnd = this.project.tracks
+      .filter((t) => t.kind === wantKind)
+      .reduce((e, t) => Math.max(e, ...t.clips.map((c) => c.startSec + c.durationSec)), 0);
+    const startSec = Math.max(0, input.startSec ?? fallbackEnd);
     const clip: Clip = {
       id: randomUUID(),
       mediaId: media.id,
@@ -230,6 +296,7 @@ export class ProjectStore {
       cropR: 0,
       cropB: 0,
       filter: '',
+      color: { ...DEFAULT_CLIP_COLOR },
       fontFamily: 'Arial',
       fontSize: 72,
       textColor: '#ffffff',
@@ -238,6 +305,9 @@ export class ProjectStore {
       textAlign: 'center',
     };
     this.snapshot();
+    const track = this.resolveLayer(wantKind, startSec, durationSec, preferred?.id);
+    if (track.kind !== wantKind)
+      return { ok: false, error: `No ${wantKind} track available` };
     track.clips.push(clip);
     track.clips.sort((a, b) => a.startSec - b.startSec);
     this.touch();
@@ -252,15 +322,15 @@ export class ProjectStore {
     text?: string;
     template?: string;
   }): OpResult<Clip> {
-    const track = input.trackId
-      ? this.project.tracks.find((t) => t.id === input.trackId)
-      : this.project.tracks.find((t) => t.kind === 'video');
-    if (!track || track.kind !== 'video')
-      return { ok: false, error: 'No video track available for text' };
     const tpl = textTemplateById(input.template);
     const durationSec = Math.max(0.5, Math.min(input.durationSec ?? 3, 3600));
-    const trackEnd = track.clips.reduce((e, c) => Math.max(e, c.startSec + c.durationSec), 0);
-    const startSec = Math.max(0, input.startSec ?? trackEnd);
+    const preferred = input.trackId
+      ? this.project.tracks.find((t) => t.id === input.trackId)
+      : this.project.tracks.find((t) => t.kind === 'video');
+    const fallbackEnd = this.project.tracks
+      .filter((t) => t.kind === 'video')
+      .reduce((e, t) => Math.max(e, ...t.clips.map((c) => c.startSec + c.durationSec)), 0);
+    const startSec = Math.max(0, input.startSec ?? fallbackEnd);
     const text = typeof input.text === 'string' && input.text.length > 0 ? input.text : tpl.sample;
     const clip: Clip = {
       id: randomUUID(),
@@ -282,6 +352,7 @@ export class ProjectStore {
       cropR: 0,
       cropB: 0,
       filter: '',
+      color: { ...DEFAULT_CLIP_COLOR },
       text,
       fontFamily: tpl.fontFamily,
       fontSize: tpl.fontSize,
@@ -291,6 +362,9 @@ export class ProjectStore {
       textAlign: tpl.textAlign,
     };
     this.snapshot();
+    const track = this.resolveLayer('video', startSec, durationSec, preferred?.id);
+    if (track.kind !== 'video')
+      return { ok: false, error: 'No video track available for text' };
     track.clips.push(clip);
     track.clips.sort((a, b) => a.startSec - b.startSec);
     this.touch();
@@ -300,46 +374,60 @@ export class ProjectStore {
   moveClip(clipId: string, startSec?: number, trackId?: string): OpResult<Clip> {
     const found = this.findClip(clipId);
     if (!found) return { ok: false, error: `Unknown clip ${clipId}` };
-    const targetTrack = trackId
+    const requestedTrack = trackId
       ? this.project.tracks.find((t) => t.id === trackId)
       : found.track;
-    if (!targetTrack) return { ok: false, error: `Unknown track ${trackId}` };
-    if (targetTrack.kind !== found.track.kind) {
-      return { ok: false, error: `Cannot move clip between ${found.track.kind} and ${targetTrack.kind} tracks` };
+    if (!requestedTrack) return { ok: false, error: `Unknown track ${trackId}` };
+    if (requestedTrack.kind !== found.track.kind) {
+      return { ok: false, error: `Cannot move clip between ${found.track.kind} and ${requestedTrack.kind} tracks` };
     }
+    const newStart = Math.max(0, startSec ?? found.clip.startSec);
     this.snapshot();
-    if (trackId && targetTrack.id !== found.track.id) {
+    // Overlaps are resolved by layering: an occupied target bumps the clip
+    // onto a free layer (auto-created when needed), never on top of a sibling.
+    const targetTrack = this.resolveLayer(
+      found.track.kind, newStart, found.clip.durationSec, requestedTrack.id, found.clip.id,
+    );
+    if (targetTrack.id !== found.track.id) {
       found.track.clips.splice(found.index, 1);
       targetTrack.clips.push(found.clip);
-      found.track = targetTrack;
     }
-    if (startSec !== undefined) found.clip.startSec = Math.max(0, startSec);
+    found.clip.startSec = newStart;
     targetTrack.clips.sort((a, b) => a.startSec - b.startSec);
     this.touch();
     return { ok: true, data: found.clip };
   }
 
-  /** deltaSec > 0 extends, < 0 shortens. edge 'in' adjusts source in-point and start. */
+  /** deltaSec > 0 extends, < 0 shortens. edge 'in' adjusts source in-point and start.
+   *  Trims clamp at neighboring clips: same-track overlaps are never created. */
   trimClip(clipId: string, edge: 'in' | 'out', deltaSec: number): OpResult<Clip> {
     const found = this.findClip(clipId);
     if (!found) return { ok: false, error: `Unknown clip ${clipId}` };
-    const { clip } = found;
+    const { track, clip } = found;
     const media = this.media(clip.mediaId);
+    // Sibling bounds on the same track (clips stay sorted by startSec).
+    const siblings = [...track.clips].sort((a, b) => a.startSec - b.startSec);
+    const idx = siblings.findIndex((c) => c.id === clip.id);
+    const prevEnd = idx > 0 ? siblings[idx - 1].startSec + siblings[idx - 1].durationSec : 0;
+    const nextStart = idx >= 0 && idx < siblings.length - 1
+      ? siblings[idx + 1].startSec
+      : Number.POSITIVE_INFINITY;
     this.snapshot();
     if (edge === 'in') {
-      const newIn = Math.max(0, clip.inSec + deltaSec);
-      const applied = newIn - clip.inSec;
-      const minDur = 0.1;
-      const maxTrim = clip.durationSec - minDur;
-      const eff = Math.max(-maxTrim, applied, clip.inSec === newIn ? applied : applied);
-      const realDelta = Math.max(-maxTrim, newIn - clip.inSec, -clip.inSec);
-      clip.inSec += realDelta;
-      clip.startSec += realDelta;
-      clip.durationSec -= realDelta;
+      // newStart must stay within [prevEnd, clipEnd - minDur].
+      const clipEnd = clip.startSec + clip.durationSec;
+      const wantStart = Math.max(prevEnd, Math.min(clip.startSec + deltaSec, clipEnd - 0.1));
+      const realDelta = wantStart - clip.startSec;
+      const maxBack = -clip.inSec; // cannot move in-point before source start
+      const applied = Math.max(maxBack, realDelta);
+      clip.inSec += applied;
+      clip.startSec += applied;
+      clip.durationSec -= applied;
     } else {
       const maxSource =
         media && media.kind !== 'image' ? media.durationSec - clip.inSec : Number.POSITIVE_INFINITY;
-      clip.durationSec = Math.max(0.1, Math.min(clip.durationSec + deltaSec, maxSource));
+      const maxEnd = Math.min(clip.startSec + maxSource, nextStart);
+      clip.durationSec = Math.max(0.1, Math.min(clip.durationSec + deltaSec, maxEnd - clip.startSec));
     }
     this.touch();
     return { ok: true, data: clip };
@@ -385,7 +473,7 @@ export class ProjectStore {
 
   setClipProps(
     clipId: string,
-    props: Partial<Pick<Clip, 'volumeDb' | 'speed' | 'fadeInSec' | 'fadeOutSec' | 'text' | 'name' | 'scale' | 'posX' | 'posY' | 'cropL' | 'cropT' | 'cropR' | 'cropB' | 'filter' | 'fontFamily' | 'fontSize' | 'textColor' | 'textBg' | 'bold' | 'textAlign'>>,
+    props: Partial<Pick<Clip, 'volumeDb' | 'speed' | 'fadeInSec' | 'fadeOutSec' | 'text' | 'name' | 'scale' | 'posX' | 'posY' | 'cropL' | 'cropT' | 'cropR' | 'cropB' | 'filter' | 'fontFamily' | 'fontSize' | 'textColor' | 'textBg' | 'bold' | 'textAlign'>> & { color?: Partial<ClipColor> },
   ): OpResult<Clip> {
     const found = this.findClip(clipId);
     if (!found) return { ok: false, error: `Unknown clip ${clipId}` };
@@ -410,8 +498,16 @@ export class ProjectStore {
       return { ok: false, error: 'textAlign must be left, center, or right' };
     if (props.bold !== undefined && typeof props.bold !== 'boolean')
       return { ok: false, error: 'bold must be a boolean' };
+    let color: ClipColor | undefined;
+    if (props.color !== undefined) {
+      if (typeof props.color !== 'object' || props.color === null)
+        return { ok: false, error: 'color must be an object' };
+      color = normClipColor({ ...found.clip.color, ...props.color });
+    }
     this.snapshot();
-    Object.assign(found.clip, props);
+    const { color: _ignored, ...rest } = props;
+    Object.assign(found.clip, rest);
+    if (color) found.clip.color = color;
     this.touch();
     return { ok: true, data: found.clip };
   }
@@ -436,19 +532,9 @@ export class ProjectStore {
   }
 
   addTrack(kind: TrackKind): OpResult<Track> {
-    const count = this.project.tracks.filter((t) => t.kind === kind).length;
-    const track: Track = {
-      id: randomUUID(),
-      kind,
-      name: `${kind === 'video' ? 'V' : 'A'}${count + 1}`,
-      muted: false,
-      locked: false,
-      clips: [],
-    };
     this.snapshot();
     // video tracks stack above V1: insert after existing video tracks
-    const idx = this.project.tracks.findLastIndex((t) => t.kind === kind);
-    this.project.tracks.splice(idx + 1, 0, track);
+    const track = this.insertTrack(kind);
     this.touch();
     return { ok: true, data: track };
   }

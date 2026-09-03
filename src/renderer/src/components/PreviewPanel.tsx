@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useEditor, op } from '../store';
 import { formatTimecode } from '../time';
-import { canvasSize, clipFilterById, type CanvasAspect, type Clip, type MediaAsset, type Project } from '../../../shared/types';
+import { canvasSize, clipColorCss, clipFilterById, type CanvasAspect, type Clip, type MediaAsset, type Project, type Track } from '../../../shared/types';
 import {
   IconPlay,
   IconPause,
@@ -86,6 +86,56 @@ function findTimelineClips(project: Project, head: number): ActiveTimelineClips 
   const visualMedia = visualClip ? project.media.find((m) => m.id === visualClip.mediaId) : undefined;
   const audioMedia = audioClip ? project.media.find((m) => m.id === audioClip.mediaId) : undefined;
   return { visualClip, visualMedia, audioClip, audioMedia, textClip };
+}
+
+/** One composited timeline layer (upper video tracks, extra audio tracks). */
+interface StackLayer {
+  track: Track;
+  clip: Clip;
+  media?: MediaAsset;
+}
+
+function clipActiveAt(c: Clip, head: number): boolean {
+  return head >= c.startSec && head < c.startSec + c.durationSec;
+}
+
+/**
+ * All active layers besides the main interactive clip, bottom-to-top:
+ * - `below`: active non-text clips on video tracks under the main clip's track
+ * - `above`: active non-text clips on video tracks over it
+ * - `audio`: active clips on unmuted audio tracks (the caller drives the
+ *   first one through the main audio element and these as extras)
+ * Mirrors the export compositor (V1 base, upper layers over it, all audio mixed).
+ */
+function findTimelineLayers(
+  project: Project,
+  head: number,
+  mainClipId?: string,
+): { below: StackLayer[]; above: StackLayer[]; audio: StackLayer[] } {
+  const tracks = project.tracks ?? [];
+  const below: StackLayer[] = [];
+  const above: StackLayer[] = [];
+  const audio: StackLayer[] = [];
+  let mainIdx = tracks.length;
+  if (mainClipId) {
+    const i = tracks.findIndex((t) => t.clips.some((c) => c.id === mainClipId));
+    if (i >= 0) mainIdx = i;
+  }
+  tracks.forEach((t, i) => {
+    if (t.muted) return;
+    if (t.kind === 'video') {
+      const clip = t.clips.find((c) => c.kind !== 'text' && c.id !== mainClipId && clipActiveAt(c, head));
+      if (!clip) return;
+      const layer = { track: t, clip, media: project.media.find((m) => m.id === clip.mediaId) };
+      if (i < mainIdx) below.push(layer);
+      else above.push(layer);
+    } else {
+      const clip = t.clips.find((c) => clipActiveAt(c, head));
+      if (!clip) return;
+      audio.push({ track: t, clip, media: project.media.find((m) => m.id === clip.mediaId) });
+    }
+  });
+  return { below, above, audio };
 }
 
 /** Point the element at this media if it isn't already. Keeps the decoder warm across gaps. */
@@ -228,6 +278,24 @@ export default function PreviewPanel() {
   const { visualClip, visualMedia, audioClip: activeAudioClip, audioMedia: activeAudioMedia, textClip } =
     project ? findTimelineClips(project, playhead) : {};
 
+  // Extra composited layers (upper/lower video layers + 2nd+ audio tracks),
+  // bottom-to-top within each group. The main interactive clip is excluded.
+  const extraLayers = project
+    ? findTimelineLayers(project, playhead, visualClip?.id)
+    : { below: [], above: [], audio: [] };
+  // Per-element refs for the best-effort layer sync (keyed by track/clip id).
+  const layerVideoRefs = useRef(new Map<string, HTMLVideoElement>());
+  const layerAudioRefs = useRef(new Map<string, HTMLAudioElement>());
+  const loadedLayerSrc = useRef(new Map<string, string>());
+  const setLayerVideoRef = (key: string) => (el: HTMLVideoElement | null) => {
+    if (el) layerVideoRefs.current.set(key, el);
+    else layerVideoRefs.current.delete(key);
+  };
+  const setLayerAudioRef = (key: string) => (el: HTMLAudioElement | null) => {
+    if (el) layerAudioRefs.current.set(key, el);
+    else layerAudioRefs.current.delete(key);
+  };
+
   const activeSubtitleClip = tracks
     .filter((t) => !t.muted)
     .flatMap((t) => t.clips)
@@ -324,17 +392,146 @@ export default function PreviewPanel() {
   const keepT = fullT + effC.t * fullH;
   const keepW = fullW * Math.max(0.01, 1 - effC.l - effC.r);
   const keepH = fullH * Math.max(0.01, 1 - effC.t - effC.b);
-  // Live color look for the picture layer.
-  const cssFilter = visualClip ? clipFilterById(visualClip.filter).css : 'none';
+  // Live color look for the picture layer (preset + manual grade).
+  const cssFilter = visualClip
+    ? [clipFilterById(visualClip.filter).css, clipColorCss(visualClip.color)]
+      .filter((f) => f && f !== 'none')
+      .join(' ')
+    : '';
   const innerWithFilter: React.CSSProperties = {
     ...innerStyle,
-    filter: cssFilter === 'none' ? undefined : cssFilter,
+    filter: cssFilter ? cssFilter : undefined,
   };
   // Transformed rect in box pixels (for the resize handles).
   const rectCX = boxW / 2 + effT.posX * boxW;
   const rectCY = boxH / 2 + effT.posY * boxH;
   const rectW = baseW * effT.scale;
   const rectH = baseH * effT.scale;
+
+  // Static geometry for non-interactive overlay layers (committed values only).
+  const geomFor = (
+    clip: Clip,
+    media: MediaAsset | undefined,
+  ): { layer: React.CSSProperties; inner: React.CSSProperties } => {
+    const mw = media?.width || 0;
+    const mh = media?.height || 0;
+    const c = clipCrop(clip);
+    const cwFrac = Math.max(0.01, 1 - c.l - c.r);
+    const chFrac = Math.max(0.01, 1 - c.t - c.b);
+    const effMW = mw * cwFrac;
+    const effMH = mh * chFrac;
+    const fit = mw > 0 && mh > 0 && boxW > 0 && boxH > 0 ? Math.min(boxW / effMW, boxH / effMH) : 0;
+    const w = fit > 0 ? effMW * fit : boxW;
+    const h = fit > 0 ? effMH * fit : boxH;
+    const t = clipTransform(clip);
+    const css = [clipFilterById(clip.filter).css, clipColorCss(clip.color)]
+      .filter((f) => f && f !== 'none')
+      .join(' ');
+    return {
+      layer: {
+        left: (boxW - w) / 2,
+        top: (boxH - h) / 2,
+        width: w,
+        height: h,
+        transform: `translate(${t.posX * boxW}px, ${t.posY * boxH}px) scale(${t.scale})`,
+        transformOrigin: 'center',
+        pointerEvents: 'none',
+      },
+      inner: {
+        position: 'absolute',
+        width: `${100 / cwFrac}%`,
+        height: `${100 / chFrac}%`,
+        left: `${(-c.l / cwFrac) * 100}%`,
+        top: `${(-c.t / chFrac) * 100}%`,
+        filter: css ? css : undefined,
+      },
+    };
+  };
+
+  // Best-effort sync for extra layers: overlay videos follow the playhead and
+  // 2nd+ audio tracks mix in. Loose threshold, no stall logic — the main
+  // picture/audio path above is untouched and always wins.
+  const syncExtraLayers = (
+    head: number,
+    proj: Project,
+    paused: boolean,
+    mainVisualId?: string,
+    mainAudioId?: string,
+  ) => {
+    const { below, above, audio } = findTimelineLayers(proj, head, mainVisualId);
+    const thresh = paused ? 0.04 : 0.4;
+    for (const l of [...below, ...above]) {
+      if (l.media?.kind !== 'video') continue;
+      const el = layerVideoRefs.current.get(l.clip.id);
+      if (!el) continue;
+      if (loadedLayerSrc.current.get(l.clip.id) !== l.media.id) {
+        loadedLayerSrc.current.set(l.clip.id, l.media.id);
+        el.src = window.taxicut.mediaUrl(l.media.path);
+        el.load();
+      }
+      applyProps(el, l.clip);
+      const target = l.clip.inSec + (head - l.clip.startSec) * l.clip.speed;
+      syncClock(el, target, thresh);
+      if (paused) {
+        if (!el.paused) el.pause();
+      } else {
+        playQuiet(el);
+      }
+    }
+    for (const t of proj.tracks ?? []) {
+      if (t.kind !== 'audio') continue;
+      const el = layerAudioRefs.current.get(t.id);
+      if (!el) continue;
+      const layer = audio.find((x) => x.track.id === t.id);
+      if (!layer || !layer.media || layer.clip.id === mainAudioId) {
+        if (!el.paused) el.pause();
+        continue;
+      }
+      const key = `a:${t.id}`;
+      if (loadedLayerSrc.current.get(key) !== layer.media.id) {
+        loadedLayerSrc.current.set(key, layer.media.id);
+        el.src = window.taxicut.mediaUrl(layer.media.path);
+        el.load();
+      }
+      applyProps(el, layer.clip);
+      syncClock(el, layer.clip.inSec + (head - layer.clip.startSec) * layer.clip.speed, thresh);
+      if (!paused) playQuiet(el);
+    }
+  };
+  const pauseExtraLayers = () => {
+    for (const el of layerVideoRefs.current.values()) {
+      try {
+        el.pause();
+      } catch {
+        /* noop */
+      }
+    }
+    for (const el of layerAudioRefs.current.values()) {
+      try {
+        el.pause();
+      } catch {
+        /* noop */
+      }
+    }
+  };
+
+  // Non-interactive composited layer (upper/lower video tracks). Images are
+  // exact; videos follow the playhead via the best-effort sync above.
+  const renderStackLayer = (l: StackLayer) => {
+    if (l.media?.kind !== 'video' && l.media?.kind !== 'image') return null;
+    const g = geomFor(l.clip, l.media);
+    return (
+      <div className="canvas-layer" key={l.clip.id} style={g.layer}>
+        <div className="canvas-inner" style={g.inner}>
+          {l.media.kind === 'image' ? (
+            <img src={window.taxicut.mediaUrl(l.media.path)} alt="" draggable={false} />
+          ) : (
+            <video ref={setLayerVideoRef(l.clip.id)} playsInline preload="auto" />
+          )}
+        </div>
+      </div>
+    );
+  };
 
   // -------------------------------------------------------------
   // Canvas drag (move) + corner-drag (uniform scale), CapCut-style.
@@ -761,11 +958,13 @@ export default function PreviewPanel() {
     if (previewMode !== 'timeline') {
       timelineVideoRef.current?.pause();
       timelineAudioRef.current?.pause();
+      pauseExtraLayers();
       return;
     }
     if (!playing) {
       timelineVideoRef.current?.pause();
       timelineAudioRef.current?.pause();
+      pauseExtraLayers();
       return;
     }
 
@@ -829,6 +1028,9 @@ export default function PreviewPanel() {
         }
       }
 
+      // Overlay videos + extra audio tracks follow along (best-effort).
+      syncExtraLayers(head, proj, false, vc?.id, ac?.id);
+
       if (holdForSeek) {
         if (seekHoldStart.current == null) seekHoldStart.current = now;
         if (now - seekHoldStart.current < 1000) {
@@ -881,6 +1083,7 @@ export default function PreviewPanel() {
         a.pause();
       }
     }
+    syncExtraLayers(playhead, project, true, visualClip?.id, activeAudioClip?.id);
   }, [previewMode, playing, playhead, project, visualClip, visualMedia, activeAudioClip, activeAudioMedia]);
 
   // -------------------------------------------------------------
@@ -1119,6 +1322,9 @@ export default function PreviewPanel() {
                 if (e.target === e.currentTarget) select(null);
               }}
             >
+              {/* Lower timeline layers render under the main clip. */}
+              {extraLayers.below.map(renderStackLayer)}
+
               {/* Transformable video layer (always mounted so the ref stays valid). */}
               <div className="canvas-layer" style={layerStyle} {...layerPointerHandlers}>
                 <div className="canvas-inner" style={innerWithFilter}>
@@ -1143,6 +1349,9 @@ export default function PreviewPanel() {
                   </div>
                 </div>
               )}
+
+              {/* Upper timeline layers render over the main clip. */}
+              {extraLayers.above.map(renderStackLayer)}
 
               {renderHandles()}
               {renderCropOverlay()}
@@ -1302,6 +1511,10 @@ export default function PreviewPanel() {
             onError={onMediaError}
             style={{ display: 'none' }}
           />
+          {/* One mixer element per audio track (2nd+ tracks join the mix). */}
+          {tracks.filter((t) => t.kind === 'audio').map((t) => (
+            <audio key={t.id} ref={setLayerAudioRef(t.id)} preload="auto" style={{ display: 'none' }} />
+          ))}
           <audio
             ref={sourceAudioRef}
             preload="auto"

@@ -131,7 +131,7 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
     });
 
   server.tool('add_clip',
-    'Append (or place) a media item on the timeline. Defaults to the end of the first matching-kind track. Use mediaId "text" for a standalone text overlay (then text/template apply).',
+    'Append (or place) a media item on the timeline. Defaults to the end of the first matching-kind track. Overlapping ranges never stack: the clip auto-layers onto a free track (a new V/A layer is created when needed). Use mediaId "text" for a standalone text overlay (then text/template apply).',
     {
       mediaId: z.string(), trackId: z.string().optional(), startSec: z.number().min(0).optional(),
       inSec: z.number().min(0).optional(), durationSec: z.number().positive().optional(),
@@ -154,7 +154,7 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
       return r.ok ? ok(r.data) : fail(r.error!);
     });
 
-  server.tool('move_clip', 'Move a clip to a new timeline position and/or track.',
+  server.tool('move_clip', 'Move a clip to a new timeline position and/or track. An occupied target auto-layers the clip onto a free track instead of overlapping.',
     { clipId: z.string(), startSec: z.number().min(0).optional(), trackId: z.string().optional() },
     async ({ clipId, startSec, trackId }) => {
       const r = await store.dispatch({ op: 'timeline:moveClip', clipId, startSec, trackId });
@@ -183,7 +183,7 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
       return r.ok ? ok(r.data) : fail(r.error!);
     });
 
-  server.tool('set_clip_properties', 'Set clip audio/playback/transform/crop/filter/text properties.',
+  server.tool('set_clip_properties', 'Set clip audio/playback/transform/crop/filter/color-grade/text properties.',
     {
       clipId: z.string(),
       volumeDb: z.number().min(-60).max(12).optional(),
@@ -198,6 +198,12 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
       cropR: z.number().min(0).max(0.9).optional(),
       cropB: z.number().min(0).max(0.9).optional(),
       filter: z.string().optional(),
+      color: z.object({
+        exposure: z.number().min(-1).max(1).optional(),
+        contrast: z.number().min(0).max(2).optional(),
+        saturation: z.number().min(0).max(2).optional(),
+        warmth: z.number().min(-1).max(1).optional(),
+      }).optional(),
       text: z.string().optional(),
       fontFamily: z.string().optional(),
       fontSize: z.number().min(8).max(500).optional(),

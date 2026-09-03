@@ -18,6 +18,64 @@ export interface MediaAsset {
 
 export type TrackKind = 'video' | 'audio';
 
+/** Per-clip color grade. exposure/warmth are -1..1 (0 = neutral),
+ *  contrast/saturation are multipliers (1 = neutral). */
+export interface ClipColor {
+  exposure: number;
+  contrast: number;
+  saturation: number;
+  warmth: number;
+}
+
+export const DEFAULT_CLIP_COLOR: ClipColor = { exposure: 0, contrast: 1, saturation: 1, warmth: 0 };
+
+/** Normalize a partial/stale color object to valid ranges. */
+export function normClipColor(c: Partial<ClipColor> | undefined): ClipColor {
+  const d = DEFAULT_CLIP_COLOR;
+  const num = (v: unknown, fb: number): number => (Number.isFinite(v) ? Number(v) : fb);
+  return {
+    exposure: Math.max(-1, Math.min(1, num(c?.exposure, d.exposure))),
+    contrast: Math.max(0, Math.min(2, num(c?.contrast, d.contrast))),
+    saturation: Math.max(0, Math.min(2, num(c?.saturation, d.saturation))),
+    warmth: Math.max(-1, Math.min(1, num(c?.warmth, d.warmth))),
+  };
+}
+
+export function isDefaultColor(c: ClipColor | undefined): boolean {
+  if (!c) return true;
+  return c.exposure === 0 && c.contrast === 1 && c.saturation === 1 && c.warmth === 0;
+}
+
+/** CSS filter fragment for the live preview ('' when neutral). Approximate match of the ffmpeg chain. */
+export function clipColorCss(c: ClipColor | undefined): string {
+  if (!c || isDefaultColor(c)) return '';
+  const parts = [
+    `brightness(${(1 + c.exposure).toFixed(3)})`,
+    `contrast(${c.contrast.toFixed(3)})`,
+    `saturate(${c.saturation.toFixed(3)})`,
+  ];
+  if (c.warmth > 0.005) parts.push(`sepia(${(c.warmth * 0.35).toFixed(3)})`);
+  else if (c.warmth < -0.005) parts.push(`hue-rotate(${(c.warmth * 12).toFixed(1)}deg)`);
+  return parts.join(' ');
+}
+
+/** ffmpeg filter chain fragment for export ('' when neutral). */
+export function clipColorFf(c: ClipColor | undefined): string {
+  if (!c || isDefaultColor(c)) return '';
+  const parts: string[] = [];
+  if (c.exposure !== 0 || c.contrast !== 1 || c.saturation !== 1) {
+    parts.push(`eq=brightness=${c.exposure.toFixed(3)}:contrast=${c.contrast.toFixed(3)}:saturation=${c.saturation.toFixed(3)}`);
+  }
+  if (Math.abs(c.warmth) >= 0.005) {
+    const w = c.warmth;
+    parts.push(
+      `colorbalance=rs=${(w * 0.3).toFixed(3)}:gs=0.000:bs=${(-w * 0.3).toFixed(3)}` +
+      `:rm=${(w * 0.18).toFixed(3)}:gm=0.000:bm=${(-w * 0.18).toFixed(3)}`,
+    );
+  }
+  return parts.join(',');
+}
+
 export interface Clip {
   id: string;
   mediaId: string;
@@ -45,6 +103,8 @@ export interface Clip {
   cropB: number;
   /** Color filter preset id ('' = none). Applies to video/image clips. */
   filter: string;
+  /** Manual color grade (grading sliders). Combined with `filter` on export/preview. */
+  color: ClipColor;
   /** Text overlay content (kind === 'text', or subtitle text on media clips). */
   text?: string;
   /** Text styling (kind === 'text'). fontSize is px at 1080p canvas height. */
@@ -231,7 +291,7 @@ export type MainOp =
   | { op: 'timeline:trimClip'; clipId: string; edge: 'in' | 'out'; deltaSec: number }
   | { op: 'timeline:splitClip'; clipId: string; atSec: number }
   | { op: 'timeline:deleteClip'; clipId: string; ripple?: boolean }
-  | { op: 'clip:setProps'; clipId: string; volumeDb?: number; speed?: number; fadeInSec?: number; fadeOutSec?: number; text?: string; name?: string; scale?: number; posX?: number; posY?: number; cropL?: number; cropT?: number; cropR?: number; cropB?: number; filter?: string; fontFamily?: string; fontSize?: number; textColor?: string; textBg?: string; bold?: boolean; textAlign?: TextAlign }
+  | { op: 'clip:setProps'; clipId: string; volumeDb?: number; speed?: number; fadeInSec?: number; fadeOutSec?: number; text?: string; name?: string; scale?: number; posX?: number; posY?: number; cropL?: number; cropT?: number; cropR?: number; cropB?: number; filter?: string; color?: Partial<ClipColor>; fontFamily?: string; fontSize?: number; textColor?: string; textBg?: string; bold?: boolean; textAlign?: TextAlign }
   | { op: 'project:setAspect'; aspect: string; width?: number; height?: number }
   | { op: 'track:add'; kind: TrackKind }
   | { op: 'track:delete'; trackId: string }

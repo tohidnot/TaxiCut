@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useEditor, op } from '../store';
 import { formatDuration } from '../time';
-import { canvasSize, CLIP_FILTERS, FONT_FAMILIES, TEXT_TEMPLATES } from '../../../shared/types';
+import { canvasSize, CLIP_FILTERS, DEFAULT_CLIP_COLOR, FONT_FAMILIES, TEXT_TEMPLATES } from '../../../shared/types';
 import type { Clip } from '../../../shared/types';
 import { IconPlus, IconSubtitles } from './Icons';
 
@@ -457,6 +457,46 @@ export default function InspectorPanel() {
                     {f.name}
                   </button>
                 ))}
+              </div>
+            </div>
+          )}
+          {(clip.kind === 'video' || clip.kind === 'image') && (
+            <div>
+              <h3>COLOR GRADE</h3>
+              {(
+                [
+                  { key: 'exposure', label: 'Exposure', min: -1, max: 1, step: 0.05 },
+                  { key: 'contrast', label: 'Contrast', min: 0, max: 2, step: 0.05 },
+                  { key: 'saturation', label: 'Saturation', min: 0, max: 2, step: 0.05 },
+                  { key: 'warmth', label: 'Warmth', min: -1, max: 1, step: 0.05 },
+                ] as const
+              ).map((s) => {
+                const val = clip.color?.[s.key] ?? DEFAULT_CLIP_COLOR[s.key];
+                return (
+                  <div className="insp-row" key={s.key}>
+                    <span>{s.label}</span>
+                    <input
+                      type="range"
+                      min={s.min}
+                      max={s.max}
+                      step={s.step}
+                      value={val}
+                      onChange={(e) =>
+                        set({ color: { ...clip.color, [s.key]: Number(e.target.value) } })
+                      }
+                      title={`${s.label}: ${val.toFixed(2)}`}
+                    />
+                    <span style={{ color: 'var(--text-dim)', minWidth: 36, textAlign: 'right' }}>
+                      {val.toFixed(2)}
+                    </span>
+                  </div>
+                );
+              })}
+              <div className="insp-row">
+                <span />
+                <button className="icon" onClick={() => set({ color: { ...DEFAULT_CLIP_COLOR } })}>
+                  Reset grade
+                </button>
               </div>
             </div>
           )}
