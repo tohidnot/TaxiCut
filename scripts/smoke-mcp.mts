@@ -60,10 +60,42 @@ const server = await startMcpHttpServer({ store, cacheDir: work }, PORT);
 console.log('MCP server up on', BASE);
 
 try {
-  const tools = (await rpc('tools/list')) as { tools: { name: string }[] };
+  const tools = (await rpc('tools/list')) as {
+    tools: { name: string; title?: string; annotations?: Record<string, boolean>; inputSchema: unknown; outputSchema?: unknown }[];
+  };
   console.log('tools:', tools.tools.map((t) => t.name).join(', '));
   assert(tools.tools.some((t) => t.name === 'export_timeline'), 'export_timeline missing');
   assert(tools.tools.some((t) => t.name === 'reorder_clip'), 'reorder_clip missing');
+  // Standard-practice surface: new query tools, counts, titles, annotations.
+  for (const n of ['server_info', 'find_clips', 'get_clip', 'project_info', 'list_media', 'get_timeline']) {
+    assert(tools.tools.some((t) => t.name === n), `${n} missing`);
+  }
+  assert(tools.tools.length === 32, `expected 32 tools, got ${tools.tools.length}`);
+  for (const t of tools.tools) {
+    assert(t.title && t.title.length > 0, `tool ${t.name} missing title`);
+    assert(t.annotations && typeof t.annotations.readOnlyHint === 'boolean', `tool ${t.name} missing annotations`);
+    assert(t.inputSchema, `tool ${t.name} missing inputSchema`);
+  }
+  const projTool = tools.tools.find((t) => t.name === 'project_info');
+  assert(projTool?.annotations?.readOnlyHint === true, 'project_info should be readOnly');
+  assert(projTool?.outputSchema, 'project_info should declare outputSchema');
+  const delTool = tools.tools.find((t) => t.name === 'delete_clip');
+  assert(delTool?.annotations?.destructiveHint === true, 'delete_clip should be destructive');
+
+  const resources = (await rpc('resources/list')) as { resources: { uri: string }[] };
+  console.log('resources:', resources.resources.map((r) => r.uri).join(', '));
+  assert(resources.resources.length === 3, `expected 3 resources, got ${resources.resources.length}`);
+
+  const prompts = (await rpc('prompts/list')) as { prompts: { name: string }[] };
+  console.log('prompts:', prompts.prompts.map((p) => p.name).join(', '));
+  assert(prompts.prompts.length === 3, `expected 3 prompts, got ${prompts.prompts.length}`);
+
+  // Discovery endpoints.
+  const health = (await (await fetch(`http://127.0.0.1:${PORT}/health`)).json()) as { ok: boolean; name: string };
+  assert(health.ok === true && health.name === 'taxicut-mcp-server', `bad /health: ${JSON.stringify(health)}`);
+  const doc = (await (await fetch(`http://127.0.0.1:${PORT}/mcp.json`)).json()) as { url: string };
+  assert(doc.url?.includes('/mcp'), `bad /mcp.json: ${JSON.stringify(doc)}`);
+  console.log('discovery endpoints: ok');
 
   // Store-level layer reshuffle: overlapping video / image / text can move
   // top ↔ bottom ↔ middle (swap or insert; never bounce off an occupied lane).
@@ -139,6 +171,29 @@ try {
   const tracks = r.payload as { clips: { id: string }[] }[];
   const totalClips = tracks.reduce((n, t) => n + t.clips.length, 0);
   assert(totalClips === 2, `expected 2 clips after split, got ${totalClips}`);
+
+  // New query surface: server_info (structured), pagination, find/get clip.
+  r = await callTool('server_info');
+  assert(r.ok, 'server_info failed');
+  assert((r.payload as { name: string }).name === 'taxicut-mcp-server', 'server_info name mismatch');
+  assert((r.payload as { toolCount: number }).toolCount === 32, 'server_info toolCount mismatch');
+
+  r = await callTool('list_media', { limit: 1, offset: 0 });
+  const page = r.payload as { total: number; count: number; has_more: boolean; items: unknown[] };
+  assert(page.total === 1 && page.count === 1 && page.has_more === false, `bad media page: ${JSON.stringify(page)}`);
+
+  r = await callTool('get_timeline', { summary: true });
+  assert(Array.isArray((r.payload as { tracks: unknown[] }).tracks), 'timeline summary missing tracks');
+
+  r = await callTool('find_clips', { query: 'clip', limit: 10 });
+  const hits = r.payload as { total: number; items: { clip: { id: string } }[] };
+  assert(hits.total === 2, `expected 2 find_clips hits, got ${hits.total}`);
+
+  r = await callTool('get_clip', { clipId });
+  assert((r.payload as { clip: { id: string } }).clip.id === clipId, 'get_clip returned wrong clip');
+
+  r = await callTool('get_clip', { clipId: 'nope' });
+  assert(!r.ok, 'get_clip should fail on unknown id');
 
   r = await callTool('undo');
   assert(r.ok, 'undo failed');

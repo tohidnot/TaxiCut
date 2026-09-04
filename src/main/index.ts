@@ -6,7 +6,7 @@ import { Readable } from 'node:stream';
 import { homedir } from 'node:os';
 import { IPC, exportSize, type MainOp, type OpResult } from '../shared/types';
 import { ProjectStore } from './store';
-import { startMcpHttpServer } from './mcp';
+import { startMcpHttpServer, writeDiscoveryFile } from './mcp';
 import { registerTerminalIpc } from './terminal';
 import { probeMedia, mediaKind, makeThumbnail, exportProject } from './ffmpeg';
 import { transcribe, toSrt } from './asr';
@@ -324,10 +324,13 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.invoke, (_e, op: MainOp) => handleOp(op));
   registerTerminalIpc();
 
-  await startMcpHttpServer({ store, cacheDir }, MCP_PORT).catch((e) =>
-    console.error(`MCP server failed on :${MCP_PORT}: ${e.message}`),
-  );
-  console.log(`TaxiCut MCP server: http://127.0.0.1:${MCP_PORT}/mcp`);
+  await startMcpHttpServer({ store, cacheDir }, MCP_PORT)
+    .then(async () => {
+      console.log(`TaxiCut MCP server: http://127.0.0.1:${MCP_PORT}/mcp`);
+      const found = await writeDiscoveryFile(MCP_PORT);
+      if (found) console.log(`TaxiCut MCP discovery: ${found}`);
+    })
+    .catch((e) => console.error(`MCP server failed on :${MCP_PORT}: ${(e as Error).message}`));
 
   createWindow();
   app.on('activate', () => {

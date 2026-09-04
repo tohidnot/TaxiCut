@@ -24,8 +24,14 @@ Requires macOS with `ffmpeg` and `ffprobe` (e.g. `brew install ffmpeg`).
 
 ## MCP server
 
-While TaxiCut is running, it exposes an MCP server (Streamable HTTP) at
-`http://127.0.0.1:19789/mcp` so external agents can edit the open project.
+While TaxiCut is running, it exposes an MCP server (`taxicut-mcp-server`, Streamable
+HTTP, stateless) at `http://127.0.0.1:19789/mcp` so external agents can edit the
+open project. Port override: `TAXICUT_MCP_PORT=19800 npm run dev`.
+
+**Zero-config:** this repo ships `.mcp.json` (live HTTP + headless stdio entries) —
+most agents (Claude Code, Cursor, VS Code, OpenCode) pick it up automatically when
+the folder is open. On startup the app also writes `~/.taxicut/mcp.json` with the
+live URL, and serves discovery docs at `GET /health` and `GET /mcp.json`.
 
 **Claude Code**
 
@@ -39,7 +45,13 @@ claude mcp add --transport http taxicut http://127.0.0.1:19789/mcp
 codex mcp add taxicut --url http://127.0.0.1:19789/mcp
 ```
 
-**Cursor** (`~/.cursor/mcp.json`)
+**Gemini CLI** (`~/.muse/settings.json`)
+
+```json
+{ "mcpServers": { "taxicut": { "httpUrl": "http://127.0.0.1:19789/mcp" } } }
+```
+
+**Cursor / VS Code** (`~/.cursor/mcp.json` or `.vscode/mcp.json`)
 
 ```json
 {
@@ -49,10 +61,29 @@ codex mcp add taxicut --url http://127.0.0.1:19789/mcp
 }
 ```
 
-Available tools include: `project_info`, `project_new/open/save`, `import_media`,
-`list_media`, `get_timeline`, `add_track`, `add_clip`, `move_clip`, `trim_clip`,
-`split_clip`, `delete_clip` (with ripple), `set_clip_properties`, `undo`/`redo`,
-`transcribe_media`, `generate_subtitles`, `export_timeline`, `export_status`.
+**Headless stdio** (no GUI — CI or agents without the app; owns its own project,
+use `--project` to open a `.taxicut` file):
+
+```bash
+npm run mcp:stdio -- --project /abs/path/project.taxicut
+```
+
+Tools (32, all with titles, descriptions, and read/destructive/idempotent
+annotations; reads also return structured output): `server_info`, `project_info`,
+`project_new/open/save`, `set_canvas_aspect`, `import_media`, `list_media`
+(paginated `limit`/`offset`, `json`/`markdown`), `delete_media`, `get_timeline`
+(full or `summary` mode), `find_clips`, `get_clip`, `add_track`, `delete_track`,
+`move_track`, `set_track_mute/audio_mute/lock`, `add_clip`, `add_text`,
+`move_clip`, `reorder_clip`, `trim_clip`, `split_clip`, `delete_clip` (with
+ripple), `set_clip_properties`, `undo`/`redo`, `transcribe_media`,
+`generate_subtitles`, `export_timeline`, `export_status`.
+
+Resources: `taxicut://project/info`, `taxicut://timeline/summary`,
+`taxicut://media/list`. Prompts: `edit-video`, `make-subtitles`, `export-video`.
+
+Tip for agents: start with `server_info`, then `project_info` /
+`get_timeline(summary=true)`; use `find_clips`/`get_clip` instead of scanning
+full timelines. Large responses truncate past ~25k chars with recovery hints.
 
 ## Local speech-to-text
 

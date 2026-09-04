@@ -10,6 +10,7 @@
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "smoke": "tsx scripts/smoke-mcp.mts",
+    "mcp:stdio": "tsx scripts/mcp-stdio.mts",
     "postinstall": "electron-rebuild -f -w node-pty || true"
   },
   "dependencies": {

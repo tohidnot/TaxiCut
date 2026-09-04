@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "taxicut": {
+      "type": "http",
+      "url": "http://127.0.0.1:19789/mcp"
+    },
+    "taxicut-headless": {
+      "command": "npx",
+      "args": ["tsx", "scripts/mcp-stdio.mts"]
+    }
+  }
+}
