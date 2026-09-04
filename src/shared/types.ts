@@ -315,7 +315,8 @@ export type MainOp =
   | { op: 'asr:transcribe'; mediaId: string }
   | { op: 'asr:subtitles'; mediaId: string }
   | { op: 'export:start'; outPath?: string }
-  | { op: 'export:status' };
+  | { op: 'export:status' }
+  | { op: 'agents:status' };
 
 export interface OpResult<T = unknown> {
   ok: boolean;

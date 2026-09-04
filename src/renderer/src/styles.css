@@ -121,6 +121,49 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 }
 .terminal-body { flex: 1; min-height: 0; padding: 4px 0 0 6px; }
 .terminal-body .xterm { height: 100%; }
+.mini-btn {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.mini-btn:hover { color: var(--text); border-color: var(--accent-dim); }
+.mini-btn.active { color: var(--text); border-color: var(--accent); }
+.mini-btn.accent { background: var(--accent-dim); border-color: var(--accent-dim); color: var(--text); }
+.mcp-setup {
+  max-height: 45%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg1);
+  font-size: 12px;
+  flex: none;
+}
+.mcp-setup-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.mcp-setup-head .spacer { flex: 1; }
+.agent-row { border-top: 1px solid var(--border); padding: 4px 10px 4px 10px; }
+.agent-row-main { display: flex; align-items: center; gap: 6px; }
+.agent-row-main .spacer { flex: 1; }
+.agent-name { color: var(--text); }
+.agent-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.agent-dot.ok { background: var(--audio-clip); }
+.agent-dot.warn { background: var(--image-clip); }
+.agent-dot.missing { background: var(--border); }
+.agent-guide { margin: 4px 0 6px 14px; color: var(--text-dim); font-size: 11px; }
+.agent-guide ol { margin: 4px 0; padding-left: 16px; }
+.agent-guide li { margin: 2px 0; }
+.agent-guide code, .mcp-setup code { color: var(--text); user-select: text; }
+.agent-meta { margin-top: 2px; }
+.mcp-setup-note { padding: 6px 10px; color: var(--text-dim); font-size: 11px; }
 
 /* Main column (everything right of the terminal) */
 .main-col {

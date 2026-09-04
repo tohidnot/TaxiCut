@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { IPC, exportSize, type MainOp, type OpResult } from '../shared/types';
 import { ProjectStore } from './store';
 import { startMcpHttpServer, writeDiscoveryFile } from './mcp';
+import { agentsGuide, mcpUrl, augmentedPath } from './mcp-setup';
 import { registerTerminalIpc } from './terminal';
 import { probeMedia, mediaKind, makeThumbnail, exportProject } from './ffmpeg';
 import { transcribe, toSrt } from './asr';
@@ -192,6 +193,9 @@ async function handleOp(op: MainOp): Promise<OpResult> {
     }
     case 'export:status':
       return { ok: true, data: [...exportJobs.values()] };
+    case 'agents:status':
+      // Read-only agent guide snapshot for the MCP Setup panel (never writes).
+      return { ok: true, data: agentsGuide(mcpUrl(MCP_PORT)) };
     default:
       return { ok: false, error: `Unknown op: ${(op as MainOp).op}` };
   }
@@ -223,6 +227,10 @@ function mimeForPath(p: string): string {
 }
 
 app.whenReady().then(async () => {
+  // GUI-launched apps inherit a sparse PATH (no Homebrew, no ~/.local/bin),
+  // so agent CLIs would be invisible to detection and the built-in terminal.
+  process.env.PATH = augmentedPath();
+  process.env.TAXICUT_MCP_URL = mcpUrl(MCP_PORT);
   // Serve local media/thumbnail files to the renderer with HTTP Range support,
   // otherwise Chromium reports the resource as unseekable and every seek
   // (scrub, clip in-points, drift correction) snaps back to 0 and stalls.

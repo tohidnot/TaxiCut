@@ -1,11 +1,12 @@
 // End-to-end smoke test: MCP server + ffmpeg export, no Electron GUI.
 // Run: npm run smoke
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, existsSync } from 'node:fs';
+import { mkdtempSync, existsSync, mkdirSync, readdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ProjectStore } from '../src/main/store';
 import { startMcpHttpServer } from '../src/main/mcp';
+import { agentsGuide, agentIds } from '../src/main/mcp-setup';
 
 const PORT = 19811;
 const BASE = `http://127.0.0.1:${PORT}/mcp`;
@@ -96,6 +97,42 @@ try {
   const doc = (await (await fetch(`http://127.0.0.1:${PORT}/mcp.json`)).json()) as { url: string };
   assert(doc.url?.includes('/mcp'), `bad /mcp.json: ${JSON.stringify(doc)}`);
   console.log('discovery endpoints: ok');
+
+  // Agent guides: read-only (fake HOME + fake `claude`), never touch real configs.
+  {
+    const ids = agentIds();
+    for (const want of ['claudecode', 'codex', 'opencode', 'grok', 'gemini', 'cursor', 'antigravity', 'vscode']) {
+      assert(ids.includes(want), `agent guide missing: ${want}`);
+    }
+    const fakeHome = join(work, 'fakehome');
+    const fakeBin = join(fakeHome, 'bin');
+    mkdirSync(fakeBin, { recursive: true });
+    const testUrl = `http://127.0.0.1:${PORT}/mcp`;
+    writeFileSync(join(fakeBin, 'claude'), `#!/bin/sh\nif [ "$1" = "mcp" ] && [ "$2" = "list" ]; then echo "taxicut: ${testUrl} (HTTP)"; fi\nexit 0\n`);
+    chmodSync(join(fakeBin, 'claude'), 0o755);
+    const opts = { home: fakeHome, path: fakeBin };
+    const { mcpUrl: guideUrl, agents } = agentsGuide(testUrl, undefined, opts);
+    assert(guideUrl === testUrl, 'guide url mismatch');
+    const byId = new Map(agents.map((a) => [a.id, a]));
+    const cc = byId.get('claudecode')!;
+    assert(cc.installed && cc.configured, 'fake claude should be installed+configured');
+    assert(cc.command === `claude mcp add --transport http -s user taxicut ${testUrl}`, `bad claude command: ${cc.command}`);
+    assert(cc.steps.length >= 3, 'claude guide needs steps');
+    for (const runnable of ['codex', 'opencode', 'grok', 'gemini']) {
+      const g = byId.get(runnable)!;
+      assert(typeof g.command === 'string' && g.command.includes(testUrl), `${runnable} needs a runnable command`);
+      assert(g.steps.length >= 2, `${runnable} guide needs steps`);
+    }
+    for (const manual of ['cursor', 'antigravity', 'vscode']) {
+      const g = byId.get(manual)!;
+      assert(g.command === null, `${manual} must be guide-only (no runnable command)`);
+      assert(g.steps.length >= 2, `${manual} guide needs steps`);
+      assert(!g.configured, `${manual} should be unconfigured in empty fake home`);
+    }
+    // Nothing but our fake bin may exist in the fake home — guides must not write.
+    assert(JSON.stringify(readdirSync(fakeHome).sort()) === JSON.stringify(['bin']), 'guides wrote into HOME!');
+    console.log('agent guides (read-only): ok');
+  }
 
   // Store-level layer reshuffle: overlapping video / image / text can move
   // top ↔ bottom ↔ middle (swap or insert; never bounce off an occupied lane).

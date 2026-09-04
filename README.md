@@ -68,6 +68,13 @@ use `--project` to open a `.taxicut` file):
 npm run mcp:stdio -- --project /abs/path/project.taxicut
 ```
 
+**In-app setup (recommended):** the built-in terminal panel has an **MCP Setup**
+button with per-agent guides for Claude Code, Codex, OpenCode, Grok Build,
+Gemini CLI, Cursor, Antigravity, and VS Code — each with a **Run** button that
+types the setup command into the terminal (you press Enter) or a manual guide
+where the agent has no setup command. A ▾ button collapses the terminal. Nothing
+is ever written to your agent configs without you running the command yourself.
+
 Tools (32, all with titles, descriptions, and read/destructive/idempotent
 annotations; reads also return structured output): `server_info`, `project_info`,
 `project_new/open/save`, `set_canvas_aspect`, `import_media`, `list_media`

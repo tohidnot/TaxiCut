@@ -2,6 +2,7 @@
 import { ipcMain, type WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { IPC } from '../shared/types';
+import { augmentedPath } from './mcp-setup';
 
 interface Session {
   id: string;
@@ -22,7 +23,13 @@ export function registerTerminalIpc(): void {
       cols: opts?.cols ?? 100,
       rows: opts?.rows ?? 30,
       cwd: process.env.HOME,
-      env: process.env as Record<string, string>,
+      // Augmented PATH so agent CLIs (homebrew, ~/.local/bin) resolve inside
+      // the built-in terminal even when the app was launched from the Dock.
+      // TAXICUT_MCP_URL points at this app's live MCP server.
+      env: {
+        ...process.env as Record<string, string>,
+        PATH: augmentedPath(),
+      },
     });
     const session: Session = { id: randomUUID(), pty: proc, sender };
     sessions.set(session.id, session);
