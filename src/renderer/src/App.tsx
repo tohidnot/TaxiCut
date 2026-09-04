@@ -129,6 +129,16 @@ export default function App() {
         } else {
           setPlayhead(0);
         }
+      } else if (cmdOrCtrl && (e.code === 'BracketRight' || e.code === 'BracketLeft')) {
+        const id = useEditor.getState().selectedClipId;
+        if (!id) return;
+        e.preventDefault();
+        const forward = e.code === 'BracketRight';
+        if (e.shiftKey) {
+          op({ op: 'timeline:reorderClip', clipId: id, position: forward ? 'front' : 'back' });
+        } else {
+          op({ op: 'timeline:reorderClip', clipId: id, direction: forward ? 1 : -1 });
+        }
       }
     };
 

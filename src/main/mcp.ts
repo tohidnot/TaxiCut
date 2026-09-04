@@ -105,9 +105,9 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
   server.tool('get_timeline', 'Get the full timeline: tracks and clips with ids, positions, trims, and audio settings.',
     {}, async () => ok(store.project.tracks));
 
-  server.tool('add_track', 'Add a video or audio track.',
-    { kind: z.enum(['video', 'audio']) },
-    async ({ kind }) => ok(unwrap(await store.dispatch({ op: 'track:add', kind }))));
+  server.tool('add_track', 'Add a video or audio track. Optional atIndex is the position within the same-kind group (video 0 = background).',
+    { kind: z.enum(['video', 'audio']), atIndex: z.number().int().min(0).optional() },
+    async ({ kind, atIndex }) => ok(unwrap(await store.dispatch({ op: 'track:add', kind, atIndex }))));
 
   server.tool('delete_track', 'Delete a track and its clips from the timeline.',
     { trackId: z.string() },
@@ -116,10 +116,24 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
       return r.ok ? ok(r.data) : fail(r.error!);
     });
 
+  server.tool('move_track', 'Reshuffle track stacking order within its kind (video array order = bottom-to-top). Use toIndex (0 = bottom V1) or direction (+1 toward foreground).',
+    { trackId: z.string(), toIndex: z.number().int().min(0).optional(), direction: z.union([z.literal(1), z.literal(-1)]).optional() },
+    async ({ trackId, toIndex, direction }) => {
+      const r = await store.dispatch({ op: 'track:move', trackId, toIndex, direction });
+      return r.ok ? ok(r.data) : fail(r.error!);
+    });
+
   server.tool('set_track_mute', 'Mute or unmute an audio or video track.',
     { trackId: z.string(), muted: z.boolean() },
     async ({ trackId, muted }) => {
       const r = await store.dispatch({ op: 'track:setMute', trackId, muted });
+      return r.ok ? ok(r.data) : fail(r.error!);
+    });
+
+  server.tool('set_track_audio_mute', 'Mute or unmute every clip audio on a track (picture untouched). For video tracks this silences their embedded audio without hiding the picture.',
+    { trackId: z.string(), muted: z.boolean() },
+    async ({ trackId, muted }) => {
+      const r = await store.dispatch({ op: 'track:setAudioMute', trackId, muted });
       return r.ok ? ok(r.data) : fail(r.error!);
     });
 
@@ -143,7 +157,7 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
     });
 
   server.tool('add_text',
-    'Add a styled text overlay clip (title, subtitle, caption…). Templates: title, subtitle, caption, lower, pop, quote.',
+    'Add a styled text overlay clip (title, subtitle, lower third…). Templates: title, subtitle, lower, pop, quote.',
     {
       text: z.string().optional(), template: z.string().optional(),
       trackId: z.string().optional(), startSec: z.number().min(0).optional(),
@@ -154,10 +168,26 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
       return r.ok ? ok(r.data) : fail(r.error!);
     });
 
-  server.tool('move_clip', 'Move a clip to a new timeline position and/or track. An occupied target auto-layers the clip onto a free track instead of overlapping.',
-    { clipId: z.string(), startSec: z.number().min(0).optional(), trackId: z.string().optional() },
-    async ({ clipId, startSec, trackId }) => {
-      const r = await store.dispatch({ op: 'timeline:moveClip', clipId, startSec, trackId });
+  server.tool('move_clip', 'Move a clip to a new timeline position and/or track. place=auto (default) bounces occupied ranges onto a free layer; place=layer lands on the given track (swaps or inserts a layer if busy).',
+    {
+      clipId: z.string(), startSec: z.number().min(0).optional(), trackId: z.string().optional(),
+      place: z.enum(['auto', 'layer']).optional(),
+    },
+    async ({ clipId, startSec, trackId, place }) => {
+      const r = await store.dispatch({ op: 'timeline:moveClip', clipId, startSec, trackId, place });
+      return r.ok ? ok(r.data) : fail(r.error!);
+    });
+
+  server.tool('reorder_clip',
+    'Reshuffle a clip\'s stacking order (images, video, text, audio). direction +1 = toward the top of the timeline (video foreground). position front/back jumps to the stack edge. toIndex is the same-kind index (video 0 = background). Occupied layers swap or insert — they never no-op.',
+    {
+      clipId: z.string(),
+      direction: z.union([z.literal(1), z.literal(-1)]).optional(),
+      toIndex: z.number().int().min(0).optional(),
+      position: z.enum(['front', 'back']).optional(),
+    },
+    async ({ clipId, direction, toIndex, position }) => {
+      const r = await store.dispatch({ op: 'timeline:reorderClip', clipId, direction, toIndex, position });
       return r.ok ? ok(r.data) : fail(r.error!);
     });
 
@@ -183,16 +213,18 @@ export function createMcpServer(deps: McpDeps, jobs: Map<string, ExportJob>): Mc
       return r.ok ? ok(r.data) : fail(r.error!);
     });
 
-  server.tool('set_clip_properties', 'Set clip audio/playback/transform/crop/filter/color-grade/text properties.',
+  server.tool('set_clip_properties', 'Set clip audio/playback/transform/crop/filter/color-grade/text/opacity properties.',
     {
       clipId: z.string(),
       volumeDb: z.number().min(-60).max(12).optional(),
       speed: z.number().min(0.1).max(10).optional(),
+      audioMuted: z.boolean().optional(),
       fadeInSec: z.number().min(0).optional(),
       fadeOutSec: z.number().min(0).optional(),
       scale: z.number().positive().optional(),
       posX: z.number().optional(),
       posY: z.number().optional(),
+      opacity: z.number().min(0).max(1).optional(),
       cropL: z.number().min(0).max(0.9).optional(),
       cropT: z.number().min(0).max(0.9).optional(),
       cropR: z.number().min(0).max(0.9).optional(),

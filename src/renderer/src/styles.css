@@ -213,6 +213,21 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   text-shadow: 0 2px 6px rgba(0,0,0,0.9);
   pointer-events: none;
 }
+/* Stacked multi-layer captions: container positions, items flow. */
+.preview-subtitles {
+  position: absolute;
+  bottom: 8%;
+  left: 0; right: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+  z-index: 4;
+}
+.preview-subtitles .preview-subtitle {
+  position: static;
+}
 .preview-wrap { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
 
 /* Canvas box: the bordered output frame (aspect-ratio letterbox). */
@@ -223,6 +238,31 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   border: 1px solid var(--border);
   border-radius: 4px;
   flex: none;
+}
+.preview-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  z-index: 1;
+}
+/* Decoder pool: real pixels (not display:none / opacity:0) so Chromium
+   keeps decoding every stacked video. Parked under the opaque canvas. */
+.video-pool {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 48px;
+  height: 48px;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+.video-pool video {
+  width: 48px;
+  height: 48px;
+  display: block;
 }
 /* Transformable visual layer (video / image), centered fit + user transform. */
 .canvas-layer {
@@ -460,13 +500,21 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 }
 .timeline-toolbar .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .timeline-body { flex: 1; display: flex; min-height: 0; }
-.track-headers { width: 132px; flex: none; border-right: 1px solid var(--border); overflow: hidden; }
+.track-headers {
+  width: 168px;
+  flex: none;
+  border-right: 1px solid var(--border);
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.track-headers::-webkit-scrollbar { display: none; }
 .track-header {
   height: 48px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 8px;
+  gap: 4px;
+  padding: 0 6px;
   border-bottom: 1px solid var(--border);
   font-size: 12px;
   color: var(--text-dim);
@@ -624,7 +672,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   justify-content: center;
   font-size: 11px;
   color: var(--accent);
-  margin-bottom: 2px;
+  box-sizing: border-box;
   transition: background 0.15s ease;
 }
 .new-layer-drop-zone.active {
@@ -732,9 +780,57 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 .track-action-btn:hover { color: var(--text); }
 .track-action-btn.active { color: var(--text); opacity: 1; }
 .track-action-btn.delete:hover { color: var(--danger); }
+.track-action-btn:disabled { opacity: 0.3; cursor: default; }
+.track-layer-btns {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  gap: 0;
+}
+.track-layer-btns .track-action-btn {
+  padding: 0 3px;
+  line-height: 1.05;
+  font-size: 10px;
+}
+.layer-order-btns {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+.layer-order-btns button {
+  padding: 3px 7px;
+  font-size: 11px;
+}
 
 /* Track lane drag-over & snap line */
 .track-lane.drag-over { background: rgba(124, 92, 255, 0.12); }
+/* Lane the dragged clip will actually land on (auto-layer resolution). */
+.track-lane.drop-target { box-shadow: inset 0 0 0 1.5px var(--accent); }
+/* Track header reshuffle (drag the grip to reorder stacking). */
+.track-header.dragging-track { opacity: 0.5; }
+.track-header.drop-track { box-shadow: inset 0 2px 0 var(--accent); background: rgba(124, 92, 255, 0.12); }
+.track-header.new-layer-header {
+  height: 36px;
+  color: var(--accent);
+  justify-content: center;
+}
+.track-drag-grip {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: 1px;
+  cursor: grab;
+  user-select: none;
+  padding: 4px 2px;
+}
+.track-drag-grip:hover { color: var(--text); }
+.track-drag-grip:active { cursor: grabbing; }
+/* Timeline trim handles: keep pointer events on the handle, allow touch drag. */
+.clip .handle { touch-action: none; }
+.clip .handle.l { border-top-left-radius: 5px; border-bottom-left-radius: 5px; }
+.clip .handle.r { border-top-right-radius: 5px; border-bottom-right-radius: 5px; }
+/* Canvas layers paint on the GPU: avoids flash while dragging text/video. */
+.canvas-layer, .canvas-text { backface-visibility: hidden; }
 .snap-line {
   position: absolute;
   top: 0;

@@ -59,6 +59,13 @@ export function clipColorCss(c: ClipColor | undefined): string {
   return parts.join(' ');
 }
 
+/** Normalize opacity to 0..1 (1 = opaque). */
+export function normOpacity(v: unknown): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(0, Math.min(1, n));
+}
+
 /** ffmpeg filter chain fragment for export ('' when neutral). */
 export function clipColorFf(c: ClipColor | undefined): string {
   if (!c || isDefaultColor(c)) return '';
@@ -88,6 +95,8 @@ export interface Clip {
   inSec: number;
   speed: number;
   volumeDb: number;
+  /** True = this clip's audio is silent (the picture still shows). */
+  audioMuted: boolean;
   fadeInSec: number;
   fadeOutSec: number;
   kind: MediaKind;
@@ -107,6 +116,8 @@ export interface Clip {
   color: ClipColor;
   /** Text overlay content (kind === 'text', or subtitle text on media clips). */
   text?: string;
+  /** Layer opacity 0..1 (1 = opaque). Upper video layers blend over lower ones. */
+  opacity: number;
   /** Text styling (kind === 'text'). fontSize is px at 1080p canvas height. */
   fontFamily: string;
   fontSize: number;
@@ -185,7 +196,6 @@ export const FONT_FAMILIES = [
 export const TEXT_TEMPLATES: TextTemplate[] = [
   { id: 'title', name: 'Title', fontFamily: 'Arial', fontSize: 120, textColor: '#ffffff', textBg: '', bold: true, textAlign: 'center', posX: 0, posY: -0.05, scale: 1, sample: 'Your Title' },
   { id: 'subtitle', name: 'Subtitle', fontFamily: 'Arial', fontSize: 64, textColor: '#ffffff', textBg: '', bold: false, textAlign: 'center', posX: 0, posY: 0.32, scale: 1, sample: 'Subtitle text' },
-  { id: 'caption', name: 'Caption', fontFamily: 'Arial', fontSize: 44, textColor: '#ffffff', textBg: '#000000', bold: false, textAlign: 'center', posX: 0, posY: 0.38, scale: 1, sample: 'Caption' },
   { id: 'lower', name: 'Lower Third', fontFamily: 'Arial', fontSize: 56, textColor: '#ffffff', textBg: '', bold: true, textAlign: 'left', posX: -0.25, posY: 0.3, scale: 1, sample: 'Name Here' },
   { id: 'pop', name: 'Pop', fontFamily: 'Impact', fontSize: 150, textColor: '#FFD23F', textBg: '', bold: true, textAlign: 'center', posX: 0, posY: 0, scale: 1, sample: 'WOW!' },
   { id: 'quote', name: 'Quote', fontFamily: 'Georgia', fontSize: 72, textColor: '#ffffff', textBg: '', bold: false, textAlign: 'center', posX: 0, posY: 0, scale: 1, sample: '“Great quote”' },
@@ -287,15 +297,18 @@ export type MainOp =
   | { op: 'media:import'; paths?: string[] }
   | { op: 'media:delete'; mediaId: string }
   | { op: 'timeline:addClip'; mediaId: string; trackId?: string; startSec?: number; inSec?: number; durationSec?: number; text?: string; template?: string }
-  | { op: 'timeline:moveClip'; clipId: string; startSec?: number; trackId?: string }
+  | { op: 'timeline:moveClip'; clipId: string; startSec?: number; trackId?: string; place?: 'auto' | 'layer' }
+  | { op: 'timeline:reorderClip'; clipId: string; direction?: 1 | -1; toIndex?: number; position?: 'front' | 'back' }
   | { op: 'timeline:trimClip'; clipId: string; edge: 'in' | 'out'; deltaSec: number }
   | { op: 'timeline:splitClip'; clipId: string; atSec: number }
   | { op: 'timeline:deleteClip'; clipId: string; ripple?: boolean }
-  | { op: 'clip:setProps'; clipId: string; volumeDb?: number; speed?: number; fadeInSec?: number; fadeOutSec?: number; text?: string; name?: string; scale?: number; posX?: number; posY?: number; cropL?: number; cropT?: number; cropR?: number; cropB?: number; filter?: string; color?: Partial<ClipColor>; fontFamily?: string; fontSize?: number; textColor?: string; textBg?: string; bold?: boolean; textAlign?: TextAlign }
+  | { op: 'clip:setProps'; clipId: string; volumeDb?: number; speed?: number; audioMuted?: boolean; fadeInSec?: number; fadeOutSec?: number; text?: string; name?: string; scale?: number; posX?: number; posY?: number; cropL?: number; cropT?: number; cropR?: number; cropB?: number; filter?: string; color?: Partial<ClipColor>; fontFamily?: string; fontSize?: number; textColor?: string; textBg?: string; bold?: boolean; textAlign?: TextAlign; opacity?: number }
   | { op: 'project:setAspect'; aspect: string; width?: number; height?: number }
-  | { op: 'track:add'; kind: TrackKind }
+  | { op: 'track:add'; kind: TrackKind; atIndex?: number }
   | { op: 'track:delete'; trackId: string }
+  | { op: 'track:move'; trackId: string; toIndex?: number; direction?: 1 | -1 }
   | { op: 'track:setMute'; trackId: string; muted: boolean }
+  | { op: 'track:setAudioMute'; trackId: string; muted: boolean }
   | { op: 'track:setLock'; trackId: string; locked: boolean }
   | { op: 'history:undo' }
   | { op: 'history:redo' }

@@ -80,9 +80,9 @@ export default function InspectorPanel() {
                 {formatDuration(clip.durationSec)} @ {clip.startSec.toFixed(2)}s (in: {clip.inSec.toFixed(2)}s)
               </span>
             </div>
-            {clip.text !== undefined && (
+            {clip.kind !== 'text' && clip.text !== undefined && clip.text !== '' && (
               <div style={{ marginTop: 6 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>Subtitle Text:</span>
+                <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>Captions (auto):</span>
                 <input
                   type="text"
                   value={clip.text}
@@ -106,6 +106,19 @@ export default function InspectorPanel() {
               />
               <span>{clip.volumeDb.toFixed(1)} dB</span>
             </div>
+            {(clip.kind === 'audio' || (clip.kind === 'video' && (clipMedia?.hasAudio ?? false))) && (
+              <div className="insp-row">
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={!!clip.audioMuted}
+                    onChange={(e) => set({ audioMuted: e.target.checked })}
+                    style={{ accentColor: 'var(--accent)' }}
+                  />
+                  Mute audio (picture keeps playing)
+                </label>
+              </div>
+            )}
             <div className="insp-row">
               <span>Fade In</span>
               <input
@@ -257,6 +270,58 @@ export default function InspectorPanel() {
               </button>
             </div>
           )}
+          <div>
+            <h3>LAYER</h3>
+            {(clip.kind === 'video' || clip.kind === 'image' || clip.kind === 'text') && (
+              <div className="insp-row">
+                <span>Opacity</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={Math.round(((clip as { opacity?: number }).opacity ?? 1) * 100)}
+                  onChange={(e) => set({ opacity: Number(e.target.value) / 100 })}
+                  title="Layer opacity — lower the top layer to see the background through it"
+                />
+                <span>{Math.round(((clip as { opacity?: number }).opacity ?? 1) * 100)}%</span>
+              </div>
+            )}
+            <div className="insp-row" style={{ flexWrap: 'wrap', gap: 6 }}>
+              <span>Order</span>
+              <div className="layer-order-btns">
+                <button
+                  title="Send to back (Cmd+Shift+[)"
+                  onClick={() => op({ op: 'timeline:reorderClip', clipId: clip.id, position: 'back' })}
+                >
+                  Back
+                </button>
+                <button
+                  title="Move down one layer (Cmd+[)"
+                  onClick={() => op({ op: 'timeline:reorderClip', clipId: clip.id, direction: -1 })}
+                >
+                  ↓
+                </button>
+                <button
+                  title="Move up one layer (Cmd+])"
+                  onClick={() => op({ op: 'timeline:reorderClip', clipId: clip.id, direction: 1 })}
+                >
+                  ↑
+                </button>
+                <button
+                  title="Bring to front (Cmd+Shift+])"
+                  onClick={() => op({ op: 'timeline:reorderClip', clipId: clip.id, position: 'front' })}
+                >
+                  Front
+                </button>
+              </div>
+            </div>
+            <div className="insp-row">
+              <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>
+                Drag a clip onto another lane to restack it, or use Back / ↓ / ↑ / Front.
+              </span>
+            </div>
+          </div>
           {(clip.kind === 'video' || clip.kind === 'image') && (
             <div>
               <h3>CROP (%)</h3>

@@ -42,7 +42,7 @@ async function callTool(name: string, args: Record<string, unknown> = {}): Promi
   return { ok: !result.isError && payload?.ok !== false, payload };
 }
 
-function assert(cond: unknown, msg: string): void {
+function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(`ASSERT: ${msg}`);
 }
 
@@ -63,6 +63,63 @@ try {
   const tools = (await rpc('tools/list')) as { tools: { name: string }[] };
   console.log('tools:', tools.tools.map((t) => t.name).join(', '));
   assert(tools.tools.some((t) => t.name === 'export_timeline'), 'export_timeline missing');
+  assert(tools.tools.some((t) => t.name === 'reorder_clip'), 'reorder_clip missing');
+
+  // Store-level layer reshuffle: overlapping video / image / text can move
+  // top ↔ bottom ↔ middle (swap or insert; never bounce off an occupied lane).
+  {
+    const s = new ProjectStore();
+    s.newProject('shuffle');
+    const mk = (id: string, kind: 'video' | 'image' = 'video') =>
+      s.addMedia({
+        id, path: testVideo, name: id, kind, durationSec: 3, width: 640, height: 360,
+        fps: 30, hasAudio: false, thumbnailPath: null,
+      });
+    mk('mv');
+    mk('mi', 'image');
+    const a = s.addClip({ mediaId: 'mv', startSec: 0, durationSec: 2 });
+    const b = s.addClip({ mediaId: 'mi', startSec: 0, durationSec: 2 });
+    const t = s.addClip({ mediaId: 'text', startSec: 0, durationSec: 2, text: 'Hi' });
+    const clipA = a.data;
+    const clipB = b.data;
+    const clipT = t.data;
+    assert(a.ok && clipA && b.ok && clipB && t.ok && clipT, 'shuffle addClip failed');
+    const vids = () => s.project.tracks.filter((x) => x.kind === 'video');
+    assert(vids().length >= 3, `expected ≥3 video layers, got ${vids().length}`);
+    const layerOf = (id: string): number => {
+      const f = s.findClip(id);
+      assert(f, `missing clip ${id}`);
+      return vids().findIndex((x) => x.id === f!.track.id);
+    };
+    assert(layerOf(clipA.id) === 0, 'video should start on the bottom layer');
+    assert(layerOf(clipT.id) === vids().length - 1, 'text should start on the top layer');
+
+    const rBack = s.reorderClip(clipT.id, { position: 'back' });
+    assert(rBack.ok, `send to back failed: ${rBack.error}`);
+    assert(layerOf(clipT.id) === 0, `text back expected 0, got ${layerOf(clipT.id)}`);
+
+    const rFront = s.reorderClip(clipT.id, { position: 'front' });
+    assert(rFront.ok, `bring to front failed: ${rFront.error}`);
+    assert(layerOf(clipT.id) === vids().length - 1, 'text should be front again');
+
+    const imgLayer = layerOf(clipB.id);
+    const rUp = s.reorderClip(clipB.id, { direction: 1 });
+    assert(rUp.ok, `move up failed: ${rUp.error}`);
+    assert(layerOf(clipB.id) > imgLayer, `image should move toward front (${imgLayer} → ${layerOf(clipB.id)})`);
+
+    const rDown = s.reorderClip(clipB.id, { direction: -1 });
+    assert(rDown.ok, `move down failed: ${rDown.error}`);
+
+    const baseId = vids()[0].id;
+    const mv = s.moveClip(clipB.id, 0, baseId, 'layer');
+    assert(mv.ok, `place=layer failed: ${mv.error}`);
+    assert(layerOf(clipB.id) === 0, `image should land on the bottom layer, got ${layerOf(clipB.id)}`);
+
+    const rMid = s.reorderClip(clipT.id, { toIndex: 1 });
+    assert(rMid.ok, `toIndex middle failed: ${rMid.error}`);
+    assert(layerOf(clipT.id) === 1, `text should land in the middle, got ${layerOf(clipT.id)}`);
+    console.log('layer reshuffle: ok');
+  }
 
   let r = await callTool('project_new', { name: 'Smoke' });
   assert(r.ok, 'project_new failed');
@@ -110,6 +167,43 @@ try {
   const dur = parseFloat(probe);
   console.log('export duration:', dur);
   assert(dur > 1.5 && dur < 3.5, `unexpected export duration ${dur}`);
+
+  // Multi-layer: overlap auto-layers onto V2, export composites both.
+  r = await callTool('add_track', { kind: 'video' });
+  assert(r.ok, 'add_track failed');
+  const v2 = (r.payload as { id: string }).id;
+  r = await callTool('add_clip', { mediaId, trackId: v2, startSec: 1, durationSec: 2 });
+  assert(r.ok, `overlay add_clip failed: ${JSON.stringify(r.payload)}`);
+
+  r = await callTool('get_timeline');
+  const tl = r.payload as { id: string; kind: string; clips: { id: string; startSec: number; durationSec: number }[] }[];
+  const vids = tl.filter((t) => t.kind === 'video');
+  assert(vids.length === 2, `expected 2 video tracks, got ${vids.length}`);
+  for (const t of vids) {
+    const cs = [...t.clips].sort((a, b) => a.startSec - b.startSec);
+    for (let i = 1; i < cs.length; i++) {
+      assert(cs[i].startSec >= cs[i - 1].startSec + cs[i - 1].durationSec - 1e-6, 'same-track overlap after auto-layer');
+    }
+  }
+
+  const out2 = join(work, 'export-layered.mp4');
+  r = await callTool('export_timeline', { path: out2 });
+  assert(r.ok, 'layered export_timeline failed');
+  const jobId2 = (r.payload as { jobId: string }).jobId;
+  for (let i = 0; i < 120; i++) {
+    await new Promise((res) => setTimeout(res, 1000));
+    r = await callTool('export_status', { jobId: jobId2 });
+    const job = r.payload as { status: string; error?: string };
+    if (job.status === 'done') break;
+    if (job.status === 'error') throw new Error(`layered export failed: ${job.error}`);
+  }
+  assert(existsSync(out2), 'layered export file missing');
+  const probe2 = execFileSync('/opt/homebrew/bin/ffprobe', [
+    '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', out2,
+  ]).toString().trim();
+  const dur2 = parseFloat(probe2);
+  console.log('layered export duration:', dur2);
+  assert(dur2 > 2 && dur2 < 4, `unexpected layered export duration ${dur2}`);
 
   console.log('\nSMOKE TEST PASSED');
 } finally {
