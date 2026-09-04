@@ -41,7 +41,15 @@ export const useEditor = create<EditorState>((set) => ({
   pxPerSec: 60,
   exportNote: null,
   setProject: (project, filePath) => set({ project, filePath }),
-  select: (selectedClipId) => set({ selectedClipId, selectedMediaId: null, previewMode: 'timeline', playing: false }),
+  select: (selectedClipId) =>
+    // Keep playing when selecting mid-playback (CapCut-style); only stop
+    // when switching back from source mode.
+    set((s) => ({
+      selectedClipId,
+      selectedMediaId: null,
+      previewMode: 'timeline',
+      playing: s.previewMode === 'timeline' ? s.playing : false,
+    })),
   selectMedia: (selectedMediaId) =>
     set({ selectedMediaId, selectedClipId: null, previewMode: selectedMediaId ? 'source' : 'timeline', playing: false, sourcePlaying: false, sourcePlayheadSec: 0 }),
   setPreviewMode: (previewMode) => set({ previewMode, playing: false, sourcePlaying: false }),

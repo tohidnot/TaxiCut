@@ -14,6 +14,11 @@ import { randomUUID } from 'node:crypto';
 import type { ExportJob } from '../shared/types';
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
+
+// Overlay videos call play() from the preview rAF (not the click stack).
+// Without this, Chromium autoplay-blocks the 2nd+ decoder and those layers
+// stay black. Must be set before app.ready.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 const MCP_PORT = Number(process.env.TAXICUT_MCP_PORT ?? 19789);
 const cacheDir = join(homedir(), '.taxicut', 'cache');
 
@@ -59,8 +64,8 @@ async function handleOp(op: MainOp): Promise<OpResult> {
   // store-level ops
   const storeOps = [
     'project:get', 'project:new', 'project:setAspect',
-    'timeline:addClip', 'timeline:moveClip', 'timeline:trimClip', 'timeline:splitClip',
-    'timeline:deleteClip', 'clip:setProps', 'track:add', 'track:delete', 'track:setMute', 'track:setLock',
+    'timeline:addClip', 'timeline:moveClip', 'timeline:reorderClip', 'timeline:trimClip', 'timeline:splitClip',
+    'timeline:deleteClip', 'clip:setProps', 'track:add', 'track:delete', 'track:move', 'track:setMute', 'track:setAudioMute', 'track:setLock',
     'media:delete', 'history:undo', 'history:redo',
   ];
   if (storeOps.includes(op.op)) return store.dispatch(op);

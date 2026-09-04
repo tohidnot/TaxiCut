@@ -5,8 +5,14 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import { join, basename } from 'node:path';
 import { promisify } from 'node:util';
-import type { Clip, MediaAsset, Project, Track } from '../shared/types';
+import type { Clip, MediaAsset, Project } from '../shared/types';
 import { clipColorFf, clipFilterById } from '../shared/types';
+import {
+  allAudioTrackClips,
+  allBaseVideoClips,
+  allOverlayVideoClips,
+  allTextClips,
+} from '../shared/timeline';
 
 const run = promisify(execFile);
 
@@ -87,6 +93,51 @@ export interface ExportOptions {
 
 function dbToGain(db: number): number {
   return Math.pow(10, db / 20);
+}
+
+/** Finite positive playback speed (legacy files may hold garbage). */
+function validSpeed(s: unknown): number {
+  return Number.isFinite(s) && (s as number) > 0 ? (s as number) : 1;
+}
+
+/**
+ * atempo accepts 0.5..2.0 — chain factors for wider retimes (store clamps
+ * speed to 0.1..10). Empty when neutral.
+ */
+function atempoChain(speed: number): string[] {
+  if (!Number.isFinite(speed) || Math.abs(speed - 1) < 1e-6) return [];
+  const parts: string[] = [];
+  let s = speed;
+  while (s > 2.0001) {
+    parts.push('atempo=2.0000');
+    s /= 2;
+  }
+  while (s < 0.4999) {
+    parts.push('atempo=0.5000');
+    s /= 0.5;
+  }
+  parts.push(`atempo=${s.toFixed(4)}`);
+  return parts;
+}
+
+/** Timeline duration -> source seconds consumed (images stills ignore speed). */
+export function clipSourceDur(clip: Clip): number {
+  return clip.durationSec * validSpeed(clip.speed);
+}
+
+/** Volume + fades for a timeline clip (times are timeline-relative). */
+function clipAudioFilter(clip: Clip): string {
+  const parts = [
+    ...atempoChain(validSpeed(clip.speed)),
+    `volume=${dbToGain(clip.volumeDb).toFixed(4)}`,
+  ];
+  if (clip.fadeInSec > 0) parts.push(`afade=t=in:st=0:d=${clip.fadeInSec}`);
+  if (clip.fadeOutSec > 0) {
+    parts.push(
+      `afade=t=out:st=${Math.max(0, clip.durationSec - clip.fadeOutSec)}:d=${clip.fadeOutSec}`,
+    );
+  }
+  return parts.join(',');
 }
 
 const clampInt = (v: number, lo: number, hi: number): number =>
@@ -174,6 +225,12 @@ function clipGeom(
   const py = clampInt((H - ch) / 2 + oy * H, 0, H - ch);
   return { srcCrop, dw, dh, cw, ch, cx, cy, px, py, centerCrop, pad, identity: false };
 }
+function clipOpacity(clip: Clip): number {
+  const o = Number((clip as { opacity?: unknown }).opacity);
+  if (!Number.isFinite(o)) return 1;
+  return Math.max(0, Math.min(1, o));
+}
+
 /**
  * Video filter mapping a clip onto the W×H canvas. Identity settings keep
  * the legacy filter.
@@ -185,15 +242,24 @@ export function clipVideoFilter(
   H: number,
   FPS: number,
 ): string {
-  const tail = `setsar=1,fps=${FPS},format=yuv420p`;
+  // Retime: the export reads duration×speed source seconds, then setpts
+  // squeezes them back onto the timeline duration (stills ignore speed).
+  const speed = media?.kind === 'image' ? 1 : validSpeed(clip.speed);
+  const retime = Math.abs(speed - 1) > 1e-6 ? `setpts=${(1 / speed).toFixed(6)}*PTS,` : '';
+  const tail = `setsar=1,${retime}fps=${FPS},format=yuv420p`;
   const filt = clipFilterById(clip.filter).ff;
   const colFf = clipColorFf(clip.color);
   const grade = [filt, colFf].filter(Boolean).join(',');
+  const opacity = clipOpacity(clip);
+  // Base picture blends over black: opacity premultiplies RGB toward black.
+  const fade = opacity < 0.999
+    ? `colorchannelmixer=rr=${opacity.toFixed(3)}:gg=${opacity.toFixed(3)}:bb=${opacity.toFixed(3)}`
+    : '';
   const g = clipGeom(media, clip, W, H);
   const parts: string[] = [];
   if (g.srcCrop) parts.push(g.srcCrop);
   if (g.identity) {
-    if (parts.length === 0 && !grade) {
+    if (parts.length === 0 && !grade && !fade) {
       return `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,${tail}`;
     }
     parts.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black`);
@@ -203,6 +269,7 @@ export function clipVideoFilter(
     if (g.pad) parts.push(`pad=${W}:${H}:${g.px}:${g.py}:black`);
   }
   if (grade) parts.push(grade);
+  if (fade) parts.push(fade);
   parts.push(tail);
   return parts.join(',');
 }
@@ -219,7 +286,13 @@ export function clipOverlayGeom(
   H: number,
   FPS: number,
 ): { filter: string; x: string; y: string } {
-  const tail = `setsar=1,fps=${FPS},format=yuv420p`;
+  const speed = media?.kind === 'image' ? 1 : validSpeed(clip.speed);
+  const retime = Math.abs(speed - 1) > 1e-6 ? `setpts=${(1 / speed).toFixed(6)}*PTS,` : '';
+  const opacity = clipOpacity(clip);
+  // Overlays keep alpha so the overlay filter blends over the base picture.
+  const tail = opacity < 0.999
+    ? `setsar=1,${retime}fps=${FPS},format=rgba,colorchannelmixer=aa=${opacity.toFixed(3)},format=yuva420p`
+    : `setsar=1,${retime}fps=${FPS},format=yuv420p`;
   const filt = clipFilterById(clip.filter).ff;
   const colFf = clipColorFf(clip.color);
   const grade = [filt, colFf].filter(Boolean).join(',');
@@ -417,30 +490,30 @@ export async function exportProject(
   const W = opts.width ?? 1920;
   const H = opts.height ?? 1080;
   const FPS = opts.fps ?? 30;
-  const unmutedVideoTracks = project.tracks.filter((t) => t.kind === 'video' && !t.muted);
-  const videoTrack: Track | undefined = unmutedVideoTracks[0];
-  const mainVideoClips = videoTrack ? [...videoTrack.clips].sort((a, b) => a.startSec - b.startSec) : [];
-  const audioClips = project.tracks
-    .filter((t) => t.kind === 'audio' && !t.muted)
-    .flatMap((t) => t.clips)
-    .sort((a, b) => a.startSec - b.startSec);
-  // Text overlays from any unmuted video track (burned onto the picture).
-  const textClips = project.tracks
-    .filter((t) => t.kind === 'video' && !t.muted)
-    .flatMap((t) => t.clips)
-    .filter((c) => c.kind === 'text' && (c.text ?? '').trim().length > 0)
-    .sort((a, b) => a.startSec - b.startSec);
+  // Layering matches the live preview exactly (shared/timeline): the base
+  // picture is the first unmuted video track holding clips, every other
+  // unmuted video track composites over it, and all audio mixes together.
+  const mainVideoClips = allBaseVideoClips(project);
+  const overlayClips = allOverlayVideoClips(project);
+  const audioClips = allAudioTrackClips(project);
+  const textClips = allTextClips(project);
 
-  if (mainVideoClips.length === 0 && audioClips.length === 0 && textClips.length === 0)
+  if (mainVideoClips.length === 0 && overlayClips.length === 0 &&
+    audioClips.length === 0 && textClips.length === 0)
     throw new Error('Timeline is empty — nothing to export');
+
+  // Full composition length: the base picture is padded with black so that
+  // overlays, audio, or text running past its end still render.
+  const totalDur = Math.max(
+    0.1,
+    ...mainVideoClips.map((c) => c.startSec + c.durationSec),
+    ...overlayClips.map((c) => c.startSec + c.durationSec),
+    ...audioClips.map((c) => c.startSec + c.durationSec),
+    ...textClips.map((c) => c.startSec + c.durationSec),
+  );
 
   const dir = await mkdtemp(join(tmpdir(), 'taxicut-export-'));
   const mediaById = new Map(project.media.map((m) => [m.id, m]));
-  // Upper-layer video/image clips (V2+): composited over the base picture.
-  const overlayClips = unmutedVideoTracks.slice(1)
-    .flatMap((t) => t.clips)
-    .filter((c) => c.kind !== 'text' && mediaById.get(c.mediaId))
-    .sort((a, b) => a.startSec - b.startSec);
   try {
     const vf = `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${FPS},format=yuv420p`;
     const segments: string[] = [];
@@ -459,14 +532,11 @@ export async function exportProject(
       segments.push(seg);
     };
 
-    if (mainVideoClips.length === 0 && (audioClips.length > 0 || textClips.length > 0)) {
-      // Audio-only (or text-only): generate black background matching content duration
-      const totalDur = Math.max(
-        0,
-        ...audioClips.map((c) => c.startSec + c.durationSec),
-        ...textClips.map((c) => c.startSec + c.durationSec),
-      );
+    if (mainVideoClips.length === 0) {
+      // No base picture (overlay-only, audio-only, or text-only timeline):
+      // generate a black background spanning the whole composition.
       await renderBlack(Math.max(1, totalDur));
+      cursorSec = Math.max(1, totalDur);
     } else {
       // 1) render each video clip to a uniform intermediate, filling gaps with black
       for (const [i, clip] of mainVideoClips.entries()) {
@@ -480,15 +550,15 @@ export async function exportProject(
         if (!media && clip.kind !== 'text') throw new Error(`Missing media for clip ${clip.name}`);
         const seg = join(dir, `seg-${String(segIndex++).padStart(4, '0')}.mp4`);
         const dur = clip.durationSec;
-        const audioFilter =
-          `volume=${dbToGain(clip.volumeDb).toFixed(4)}` +
-          (clip.fadeInSec > 0 ? `,afade=t=in:st=0:d=${clip.fadeInSec}` : '') +
-          (clip.fadeOutSec > 0
-            ? `,afade=t=out:st=${Math.max(0, dur - clip.fadeOutSec)}:d=${clip.fadeOutSec}`
-            : '');
+        const audioFilter = clipAudioFilter(clip);
         const args = ['-y', '-hide_banner', '-loglevel', 'error'];
         if (media && clip.kind !== 'image' && media.kind !== 'image') {
-          args.push('-ss', clip.inSec.toFixed(3), '-i', media.path, '-t', dur.toFixed(3));
+          // Retimed reads: consume duration×speed source seconds; the video
+          // setpts + audio atempo squeeze them back onto the timeline.
+          // Clamped so legacy over-long clips can't over-read past EOF.
+          const srcAvail = media.durationSec > 0 ? Math.max(0.1, media.durationSec - clip.inSec) : dur;
+          const srcDur = Math.max(0.1, Math.min(clipSourceDur(clip), srcAvail));
+          args.push('-ss', clip.inSec.toFixed(3), '-i', media.path, '-t', srcDur.toFixed(3));
         } else if (media) {
           // image clip: loop the still
           args.push('-loop', '1', '-t', dur.toFixed(3), '-i', media.path);
@@ -496,7 +566,7 @@ export async function exportProject(
           // plain color/text placeholder: black segment
           args.push('-f', 'lavfi', '-t', dur.toFixed(3), '-i', `color=c=black:s=${W}x${H}:r=${FPS}`);
         }
-        const hasSrcAudio = media?.hasAudio && media.kind !== 'image';
+        const hasSrcAudio = media?.hasAudio && media.kind !== 'image' && !clip.audioMuted;
         const clipVf = clipVideoFilter(media, clip, W, H, FPS);
         if (hasSrcAudio) {
           args.push('-vf', clipVf, '-af', audioFilter, '-c:v', 'libx264', '-preset', 'veryfast',
@@ -512,10 +582,11 @@ export async function exportProject(
         opts.onProgress?.((i + 1) / (mainVideoClips.length + 1));
       }
 
-      // Fill remaining gap if audio clips extend beyond last video clip
-      const maxAudioEnd = audioClips.reduce((max, c) => Math.max(max, c.startSec + c.durationSec), 0);
-      if (maxAudioEnd > cursorSec + 0.03) {
-        await renderBlack(maxAudioEnd - cursorSec);
+      // Pad the base picture with black up to the full composition length so
+      // overlays, audio, or text running past its end still render.
+      if (totalDur > cursorSec + 0.03) {
+        await renderBlack(totalDur - cursorSec);
+        cursorSec = totalDur;
       }
     }
 
@@ -553,32 +624,36 @@ export async function exportProject(
 
     // 2c) composite upper-layer video/image clips over the picture.
     // Each overlay keeps its canvas transform (scale/pos/crop/filter/grade).
-    if (overlayClips.length > 0) {
+    // allOverlayVideoClips guarantees media; the defensive filter preserves
+    // input numbering so [n:v] labels always match the -i order.
+    const overs = overlayClips.filter((c) => mediaById.get(c.mediaId));
+    if (overs.length > 0) {
       const overOut = join(dir, 'overlay.mp4');
       const inputs: string[] = ['-i', pictureSrc];
       const parts: string[] = [];
       let label = '0:v';
-      overlayClips.forEach((clip, i) => {
-        const media = mediaById.get(clip.mediaId);
-        if (!media) return;
+      overs.forEach((clip, i) => {
+        const media = mediaById.get(clip.mediaId)!;
         const end = clip.startSec + clip.durationSec;
         const n = i + 1;
         if (media.kind === 'image') {
           inputs.push('-loop', '1', '-t', clip.durationSec.toFixed(3), '-i', media.path);
         } else {
-          inputs.push('-ss', clip.inSec.toFixed(3), '-t', clip.durationSec.toFixed(3), '-i', media.path);
+          const srcAvail = media.durationSec > 0 ? Math.max(0.1, media.durationSec - clip.inSec) : clip.durationSec;
+          const srcDur = Math.max(0.1, Math.min(clipSourceDur(clip), srcAvail));
+          inputs.push('-ss', clip.inSec.toFixed(3), '-t', srcDur.toFixed(3), '-i', media.path);
         }
         const g = clipOverlayGeom(media, clip, W, H, FPS);
         const ov = `ov${n}`;
         parts.push(`[${n}:v]${g.filter}[${ov}]`);
-        const out = i === overlayClips.length - 1 ? 'vout' : `v${n}`;
+        const out = i === overs.length - 1 ? 'vout' : `v${n}`;
         parts.push(
           `[${label}][${ov}]overlay=${g.x}:${g.y}` +
           `:enable='between(t,${clip.startSec.toFixed(3)},${end.toFixed(3)})'[${out}]`,
         );
         label = out;
-        // Overlay clips with sound join the audio mix below.
-        if (media.hasAudio && media.kind !== 'image') audioClips.push(clip);
+        // Overlay clips with sound join the audio mix below (muted ones stay silent).
+        if (media.hasAudio && media.kind !== 'image' && !clip.audioMuted) audioClips.push(clip);
       });
       await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', ...inputs,
         '-filter_complex', parts.join(';'), '-map', '[vout]', '-map', '0:a',
@@ -587,34 +662,41 @@ export async function exportProject(
       pictureSrc = overOut;
     }
 
-    // 3) mix standalone audio clips (from audio tracks) over the concat result
-    if (audioClips.length > 0) {
+    // 3) mix audio-track clips + sounding overlay clips over the picture.
+    // Inputs and [n:a] labels are built in lockstep (skipped clips consume no
+    // input), with per-clip retime (atempo), volume, fades, and start delay.
+    {
       const inputs: string[] = ['-i', pictureSrc];
       const filters: string[] = [];
       const mixLabels: string[] = ['[0:a]'];
-      audioClips.forEach((clip, i) => {
+      let n = 0;
+      for (const clip of audioClips) {
         const media = mediaById.get(clip.mediaId);
-        if (!media || !media.hasAudio) return;
-        const n = i + 1;
-        inputs.push('-ss', clip.inSec.toFixed(3), '-t', clip.durationSec.toFixed(3), '-i', media.path);
+        if (!media || !media.hasAudio || media.kind === 'image' || clip.audioMuted) continue;
+        n++;
+        const srcAvail = media.durationSec > 0 ? Math.max(0.1, media.durationSec - clip.inSec) : clip.durationSec;
+        const srcDur = Math.max(0.1, Math.min(clipSourceDur(clip), srcAvail));
+        inputs.push('-ss', clip.inSec.toFixed(3), '-t', srcDur.toFixed(3), '-i', media.path);
         const delayMs = Math.round(clip.startSec * 1000);
-        filters.push(
-          `[${n}:a]volume=${dbToGain(clip.volumeDb).toFixed(4)},adelay=${delayMs}|${delayMs}[a${n}]`,
-        );
+        const chain = [...atempoChain(validSpeed(clip.speed)), `volume=${dbToGain(clip.volumeDb).toFixed(4)}`];
+        if (clip.fadeInSec > 0) chain.push(`afade=t=in:st=0:d=${clip.fadeInSec}`);
+        if (clip.fadeOutSec > 0) {
+          chain.push(`afade=t=out:st=${Math.max(0, clip.durationSec - clip.fadeOutSec)}:d=${clip.fadeOutSec}`);
+        }
+        chain.push(`adelay=${delayMs}|${delayMs}`);
+        filters.push(`[${n}:a]${chain.join(',')}[a${n}]`);
         mixLabels.push(`[a${n}]`);
-      });
+      }
       if (mixLabels.length > 1) {
         filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=first:dropout_transition=0[aout]`);
         await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', ...inputs,
           '-filter_complex', filters.join(';'), '-map', '0:v', '-map', '[aout]',
           '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', outPath]);
-      } else {
+      } else if (pictureSrc !== outPath) {
         await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', '-i', pictureSrc, '-c', 'copy', outPath]);
       }
-    } else if (pictureSrc !== outPath) {
-      await run(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', '-i', pictureSrc, '-c', 'copy', outPath]);
+      // else: text was already burned straight to outPath — nothing left to do.
     }
-    // else: text was already burned straight to outPath — nothing left to do.
 
     // 4) Write sidecar SRT for transcription subtitle clips (titles excluded)
     const subtitleClips = project.tracks
