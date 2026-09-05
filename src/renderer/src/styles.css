@@ -17,7 +17,7 @@
   --primary-foreground: #ffffff;
   --secondary: var(--bg3);
   --secondary-foreground: var(--text);
-  --muted: var(--bg2);
+  --muted: var(--bg3);
   --muted-foreground: var(--text-dim);
   --accent-foreground: #ffffff;
   --destructive: var(--danger);
@@ -115,7 +115,10 @@ body {
   user-select: none;
 }
 
-button {
+/* Legacy element defaults. They skip shadcn components (which always carry
+   a data-slot attribute) so utilities win on migrated UI, while the
+   unmigrated panels keep their exact look. */
+button:not([data-slot]) {
   background: var(--bg3);
   color: var(--text);
   border: 1px solid var(--border);
@@ -124,12 +127,12 @@ button {
   font: inherit;
   cursor: pointer;
 }
-button:hover { background: #2c2c34; }
+button:not([data-slot]):hover { background: #2c2c34; }
 button.accent { background: var(--accent); border-color: var(--accent-dim); }
 button:disabled { opacity: 0.4; cursor: default; }
 button.icon { padding: 4px 7px; }
 
-input[type='text'], input[type='number'], textarea, select {
+input[type='text']:not([data-slot]), input[type='number']:not([data-slot]), textarea:not([data-slot]), select:not([data-slot]) {
   background: var(--bg0);
   color: var(--text);
   border: 1px solid var(--border);
@@ -138,7 +141,7 @@ input[type='text'], input[type='number'], textarea, select {
   font: inherit;
   outline: none;
 }
-input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+input:not([data-slot]):focus, textarea:not([data-slot]):focus, select:not([data-slot]):focus { border-color: var(--accent); }
 
 .app {
   display: flex;
