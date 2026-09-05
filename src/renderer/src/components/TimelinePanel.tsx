@@ -10,10 +10,11 @@ import {
   IconRipple,
   IconPlus,
   IconMinus,
+  IconCopy,
+  IconPaste,
   IconVideo,
   IconAudio,
   IconImage,
-  IconSubtitles,
   IconEye,
   IconEyeOff,
   IconSpeaker,
@@ -47,6 +48,8 @@ export default function TimelinePanel() {
   const setZoom = useEditor((s) => s.setZoom);
   const selectedId = useEditor((s) => s.selectedClipId);
   const select = useEditor((s) => s.select);
+  const copiedClipId = useEditor((s) => s.copiedClipId);
+  const setCopiedClip = useEditor((s) => s.setCopiedClip);
   const scrollRef = useRef<HTMLDivElement>(null);
   const headersRef = useRef<HTMLDivElement>(null);
   const lanesRef = useRef<HTMLDivElement>(null);
@@ -168,6 +171,18 @@ export default function TimelinePanel() {
       op({ op: 'timeline:deleteClip', clipId: selectedId, ripple });
       select(null);
     }
+  };
+
+  const copySelected = () => {
+    if (selectedId) setCopiedClip(selectedId);
+  };
+
+  const pasteCopied = async () => {
+    const src = copiedClipId ?? selectedId;
+    if (!src) return;
+    const r = await op({ op: 'timeline:duplicateClip', clipId: src, startSec: playhead });
+    if (r.ok && r.data) select((r.data as Clip).id);
+    else if (!r.ok) alert(r.error);
   };
 
   const moveLayer = (clip: Clip, dir: 1 | -1) =>
@@ -657,31 +672,24 @@ export default function TimelinePanel() {
         >
           <IconTrash size={13} /> Delete
         </button>
-        <button
-          className="icon"
-          onClick={() => deleteSelected(true)}
-          disabled={!selectedId}
-          title="Ripple delete selected clip (Shift+Backspace)"
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
-        >
-          <IconRipple size={13} /> Ripple
-        </button>
         <span style={{ width: 8 }} />
         <button
           className="icon"
-          onClick={() => op({ op: 'track:add', kind: 'video' })}
-          title="Add video layer track"
+          onClick={copySelected}
+          disabled={!selectedId}
+          title="Copy selected clip (Cmd+C)"
           style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
         >
-          <IconPlus size={11} /> <IconVideo size={12} /> Video
+          <IconCopy size={13} /> Copy
         </button>
         <button
           className="icon"
-          onClick={() => op({ op: 'track:add', kind: 'audio' })}
-          title="Add audio track"
+          onClick={pasteCopied}
+          disabled={!copiedClipId && !selectedId}
+          title="Paste copied clip at playhead (Cmd+V)"
           style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
         >
-          <IconPlus size={11} /> <IconAudio size={12} /> Audio
+          <IconPaste size={13} /> Paste
         </button>
         <button
           className="icon"
@@ -693,7 +701,7 @@ export default function TimelinePanel() {
           title="Add text overlay at playhead"
           style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
         >
-          <IconPlus size={11} /> <IconSubtitles size={12} /> Text
+          <IconPlus size={11} /> Text
         </button>
         <div className="right">
           <button className="icon" onClick={() => setZoom(Math.max(10, pxPerSec - 15))} title="Zoom out">
@@ -1036,9 +1044,7 @@ export default function TimelinePanel() {
 
                           {/* Clip Header Badge */}
                           <div className="clip-badge">
-                            {c.text ? (
-                              <IconSubtitles size={10} />
-                            ) : t.kind === 'audio' ? (
+                            {c.kind === 'text' ? null : t.kind === 'audio' ? (
                               <IconAudio size={10} />
                             ) : media?.kind === 'image' ? (
                               <IconImage size={10} />
@@ -1122,6 +1128,29 @@ export default function TimelinePanel() {
             }}
           >
             <IconTrash size={12} /> Delete Clip
+          </div>
+          <div
+            className="context-menu-item"
+            style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+            onClick={() => {
+              setCopiedClip(contextMenu.clip.id);
+              setContextMenu(null);
+            }}
+          >
+            <IconCopy size={12} /> Copy Clip
+          </div>
+          <div
+            className="context-menu-item"
+            style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+            onClick={async () => {
+              const target = contextMenu.clip;
+              setContextMenu(null);
+              const r = await op({ op: 'timeline:duplicateClip', clipId: target.id, startSec: playhead });
+              if (r.ok && r.data) select((r.data as Clip).id);
+              else if (!r.ok) alert(r.error);
+            }}
+          >
+            <IconPaste size={12} /> Paste at Playhead
           </div>
           <div
             className="context-menu-item"

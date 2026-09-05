@@ -6,7 +6,6 @@ import {
   IconUpload,
   IconPlus,
   IconClose,
-  IconSubtitles,
   IconTrash,
   IconPlay,
   IconVideo,
@@ -22,8 +21,6 @@ export default function MediaPanel() {
   const setPreviewMode = useEditor((s) => s.setPreviewMode);
 
   const [query, setQuery] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [busyMessage, setBusyMessage] = useState('');
   const [isDragOver, setIsDragOver] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; media: MediaAsset } | null>(null);
   // Multi-select for batch timeline inserts (checkbox / Cmd-click / Shift-click).
@@ -34,7 +31,6 @@ export default function MediaPanel() {
     m.name.toLowerCase().includes(query.toLowerCase()),
   );
   const checkedSet = new Set(checked);
-  const checkedMedia = media.filter((m) => checkedSet.has(m.id));
 
   const toggleCheck = (id: string, range: boolean) => {
     if (range && anchorId) {
@@ -63,34 +59,6 @@ export default function MediaPanel() {
   const addClipAtPlayhead = (mediaId: string) => {
     setPreviewMode('timeline');
     op({ op: 'timeline:addClip', mediaId, startSec: playheadSec });
-  };
-
-  // Batch insert: selected items laid end-to-end from the playhead.
-  // Video/images chain on video layers, audio chains on audio layers.
-  const addCheckedToTimeline = async () => {
-    if (checkedMedia.length === 0) return;
-    setPreviewMode('timeline');
-    let curV = playheadSec;
-    let curA = playheadSec;
-    for (const m of checkedMedia) {
-      const dur = m.kind === 'image' ? 5 : m.durationSec || 5;
-      if (m.kind === 'audio') {
-        await op({ op: 'timeline:addClip', mediaId: m.id, startSec: curA });
-        curA += dur;
-      } else {
-        await op({ op: 'timeline:addClip', mediaId: m.id, startSec: curV });
-        curV += dur;
-      }
-    }
-  };
-
-  const transcribe = async (m: MediaAsset) => {
-    setBusy(true);
-    setBusyMessage(`Transcribing ${m.name} with Parakeet…`);
-    const r = await op({ op: 'asr:subtitles', mediaId: m.id });
-    setBusy(false);
-    setBusyMessage('');
-    if (!r.ok) alert(r.error);
   };
 
   const handleFileDrop = async (e: React.DragEvent) => {
@@ -123,16 +91,7 @@ export default function MediaPanel() {
     >
       <div className="panel-header">
         <span>Media Library</span>
-        {checkedMedia.length > 0 && (
-          <button
-            className="accent"
-            onClick={addCheckedToTimeline}
-            title={`Add ${checkedMedia.length} selected item(s) to the timeline, end-to-end from the playhead`}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
-          >
-            <IconPlus size={12} /> Timeline ({checkedMedia.length})
-          </button>
-        )}
+        <span className="spacer" />
         <button onClick={importMedia} title="Import video, audio, or images" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
           <IconUpload size={12} /> Import…
         </button>
@@ -206,18 +165,6 @@ export default function MediaPanel() {
               >
                 <IconPlus size={11} />
               </button>
-              {m.hasAudio && (
-                <button
-                  className="media-action-btn"
-                  title="Generate Subtitles"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (!busy) transcribe(m);
-                  }}
-                >
-                  <IconSubtitles size={11} />
-                </button>
-              )}
               <button
                 className="media-action-btn"
                 title="Remove from project"
@@ -244,8 +191,6 @@ export default function MediaPanel() {
           </div>
         ))}
       </div>
-
-      {busy && <div className="panel-header" style={{ color: 'var(--accent)' }}>{busyMessage}</div>}
 
       {/* Media Context Menu */}
       {contextMenu && (
@@ -274,19 +219,6 @@ export default function MediaPanel() {
           >
             <IconPlus size={12} /> Add to Timeline at Playhead
           </div>
-          {contextMenu.media.hasAudio && (
-            <div
-              className="context-menu-item"
-              style={{ display: 'flex', alignItems: 'center', gap: 6 }}
-              onClick={() => {
-                const target = contextMenu.media;
-                setContextMenu(null);
-                transcribe(target);
-              }}
-            >
-              <IconSubtitles size={12} /> Generate Subtitles (Parakeet)
-            </div>
-          )}
           <div className="context-menu-divider" />
           <div
             className="context-menu-item"

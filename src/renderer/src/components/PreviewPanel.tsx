@@ -1523,7 +1523,7 @@ export default function PreviewPanel() {
               className={`tab-btn ${previewMode === 'source' ? 'active' : ''}`}
               onClick={() => setPreviewMode('source')}
             >
-              Source: {sourceMedia.name}
+              Source
             </button>
           )}
         </div>

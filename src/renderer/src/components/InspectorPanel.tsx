@@ -1,9 +1,8 @@
-import { useState } from 'react';
 import { useEditor, op } from '../store';
 import { formatDuration } from '../time';
 import { canvasSize, CLIP_FILTERS, DEFAULT_CLIP_COLOR, FONT_FAMILIES, TEXT_TEMPLATES } from '../../../shared/types';
 import type { Clip } from '../../../shared/types';
-import { IconPlus, IconSubtitles } from './Icons';
+import { IconPlus } from './Icons';
 
 const ALIGN_SPOTS = [
   { id: 'tl', x: -1, y: -1 }, { id: 'tc', x: 0, y: -1 }, { id: 'tr', x: 1, y: -1 },
@@ -19,7 +18,6 @@ export default function InspectorPanel() {
   const setPreviewMode = useEditor((s) => s.setPreviewMode);
   const setCropMode = useEditor((s) => s.setCropMode);
   const cropMode = useEditor((s) => s.cropMode);
-  const [busy, setBusy] = useState(false);
 
   let clip: Clip | undefined;
   for (const t of project?.tracks ?? []) {
@@ -46,14 +44,6 @@ export default function InspectorPanel() {
 
   const set = (props: Record<string, unknown>) =>
     clip && op({ op: 'clip:setProps', clipId: clip.id, ...props } as never);
-
-  const transcribe = async () => {
-    if (!selectedMedia) return;
-    setBusy(true);
-    const r = await op({ op: 'asr:subtitles', mediaId: selectedMedia.id });
-    setBusy(false);
-    if (!r.ok) alert(r.error);
-  };
 
   return (
     <div className="inspector">
@@ -611,15 +601,6 @@ export default function InspectorPanel() {
             >
               <IconPlus size={12} /> Add to Timeline
             </button>
-            {selectedMedia.hasAudio && (
-              <button
-                disabled={busy}
-                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
-                onClick={transcribe}
-              >
-                <IconSubtitles size={12} /> {busy ? 'Transcribing…' : 'Generate Subtitles'}
-              </button>
-            )}
           </div>
         </div>
       ) : null}

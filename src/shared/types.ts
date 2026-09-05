@@ -302,6 +302,7 @@ export type MainOp =
   | { op: 'timeline:trimClip'; clipId: string; edge: 'in' | 'out'; deltaSec: number }
   | { op: 'timeline:splitClip'; clipId: string; atSec: number }
   | { op: 'timeline:deleteClip'; clipId: string; ripple?: boolean }
+  | { op: 'timeline:duplicateClip'; clipId: string; startSec?: number; trackId?: string }
   | { op: 'clip:setProps'; clipId: string; volumeDb?: number; speed?: number; audioMuted?: boolean; fadeInSec?: number; fadeOutSec?: number; text?: string; name?: string; scale?: number; posX?: number; posY?: number; cropL?: number; cropT?: number; cropR?: number; cropB?: number; filter?: string; color?: Partial<ClipColor>; fontFamily?: string; fontSize?: number; textColor?: string; textBg?: string; bold?: boolean; textAlign?: TextAlign; opacity?: number }
   | { op: 'project:setAspect'; aspect: string; width?: number; height?: number }
   | { op: 'track:add'; kind: TrackKind; atIndex?: number }

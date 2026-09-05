@@ -66,7 +66,7 @@ async function handleOp(op: MainOp): Promise<OpResult> {
   const storeOps = [
     'project:get', 'project:new', 'project:setAspect',
     'timeline:addClip', 'timeline:moveClip', 'timeline:reorderClip', 'timeline:trimClip', 'timeline:splitClip',
-    'timeline:deleteClip', 'clip:setProps', 'track:add', 'track:delete', 'track:move', 'track:setMute', 'track:setAudioMute', 'track:setLock',
+    'timeline:deleteClip', 'timeline:duplicateClip', 'clip:setProps', 'track:add', 'track:delete', 'track:move', 'track:setMute', 'track:setAudioMute', 'track:setLock',
     'media:delete', 'history:undo', 'history:redo',
   ];
   if (storeOps.includes(op.op)) return store.dispatch(op);

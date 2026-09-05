@@ -100,6 +100,27 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   border-right: 1px solid var(--border);
   background: var(--bg1);
 }
+/* Folded: slim rail — the xterm host stays mounted (display:none) so the
+   session survives folding. */
+.terminal-panel.folded {
+  width: 30px;
+  min-width: 30px;
+  flex: none;
+  align-items: stretch;
+}
+.terminal-rail-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--text-dim);
+  padding: 10px 0;
+  cursor: pointer;
+  flex: none;
+}
+.terminal-rail-btn:hover { color: var(--text); background: transparent; }
 .panel-header {
   height: 34px;
   display: flex;
@@ -112,6 +133,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   flex: none;
 }
 .panel-header .spacer { flex: 1; }
+.panel-header button { flex: none; }
+.media-panel .panel-header > span:first-child { white-space: nowrap; }
 .terminal-hint {
   padding: 6px 10px;
   font-size: 11px;
@@ -495,8 +518,15 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  scrollbar-width: none;
 }
+.inspector::-webkit-scrollbar { display: none; }
 .inspector .body { padding: 12px; display: flex; flex-direction: column; gap: 14px; }
+/* Separator line between sections so each group reads as its own block. */
+.inspector .body > div + div {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
 .inspector h3 { font-size: 10px; letter-spacing: 1.2px; color: var(--text-dim); margin-bottom: 6px; font-weight: 600; }
 .insp-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; font-size: 12px; }
 .insp-row input[type='range'] { flex: 1; accent-color: var(--accent); }
@@ -765,7 +795,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* Preview tabs & media controls */
-.preview-tabs { display: flex; align-items: center; gap: 4px; }
+.preview-tabs { display: flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; }
 .tab-btn {
   background: transparent;
   border: none;
@@ -774,6 +804,11 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   font-size: 11px;
   border-radius: 4px;
   cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+  flex: none;
 }
 .tab-btn:hover { background: var(--bg2); color: var(--text); }
 .tab-btn.active { background: var(--bg3); color: var(--text); font-weight: 600; }
@@ -922,6 +957,18 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 .media-panel.drop-active {
   border: 2px dashed var(--accent);
   background: rgba(124, 92, 255, 0.06);
+}
+/* Filter row: centered, edge-to-edge below the header. */
+.media-search {
+  display: flex;
+  justify-content: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.media-search input {
+  flex: 1;
+  min-width: 0;
 }
 
 /* Context Menu */

@@ -6,6 +6,7 @@ interface EditorState {
   filePath: string | null;
   selectedClipId: string | null;
   selectedMediaId: string | null;
+  copiedClipId: string | null;
   previewMode: 'timeline' | 'source';
   playheadSec: number;
   playing: boolean;
@@ -17,6 +18,7 @@ interface EditorState {
   setProject: (p: Project, filePath: string | null) => void;
   select: (clipId: string | null) => void;
   selectMedia: (mediaId: string | null) => void;
+  setCopiedClip: (clipId: string | null) => void;
   setPreviewMode: (mode: 'timeline' | 'source') => void;
   setPlayhead: (sec: number) => void;
   setPlaying: (playing: boolean) => void;
@@ -32,6 +34,7 @@ export const useEditor = create<EditorState>((set) => ({
   filePath: null,
   selectedClipId: null,
   selectedMediaId: null,
+  copiedClipId: null,
   previewMode: 'timeline',
   playheadSec: 0,
   playing: false,
@@ -52,6 +55,7 @@ export const useEditor = create<EditorState>((set) => ({
     })),
   selectMedia: (selectedMediaId) =>
     set({ selectedMediaId, selectedClipId: null, previewMode: selectedMediaId ? 'source' : 'timeline', playing: false, sourcePlaying: false, sourcePlayheadSec: 0 }),
+  setCopiedClip: (copiedClipId) => set({ copiedClipId }),
   setPreviewMode: (previewMode) => set({ previewMode, playing: false, sourcePlaying: false }),
   setPlayhead: (playheadSec) => set({ playheadSec }),
   setPlaying: (playing) => set({ playing }),

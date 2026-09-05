@@ -640,6 +640,31 @@ export class ProjectStore {
     return { ok: true, data: { removed: clipId, ripple } };
   }
 
+  /** Copy/paste: clone a clip with a new id, preserving every prop, placed
+   *  via the layer resolver (never overlaps). One undo step. */
+  duplicateClip(clipId: string, startSec?: number, trackId?: string): OpResult<Clip> {
+    const found = this.findClip(clipId);
+    if (!found) return { ok: false, error: `Unknown clip ${clipId}` };
+    const wantKind = found.track.kind;
+    const at = Math.max(0, startSec ?? found.clip.startSec + found.clip.durationSec);
+    const preferred = trackId
+      ? this.project.tracks.find((t) => t.id === trackId)
+      : found.track;
+    if (preferred && preferred.kind !== wantKind)
+      return { ok: false, error: `Cannot paste ${wantKind} clip onto ${preferred.kind} track` };
+    if (preferred && preferred.locked)
+      return { ok: false, error: `Track ${preferred.name} is locked` };
+    this.snapshot();
+    const clone: Clip = { ...structuredClone(found.clip), id: randomUUID(), startSec: at };
+    // No excludeClipId: the source clip stays on its track, so the room
+    // check must see it (otherwise the clone could land overlapping it).
+    const dest = this.resolveLayer(wantKind, at, clone.durationSec, preferred?.id);
+    dest.clips.push(clone);
+    dest.clips.sort((a, b) => a.startSec - b.startSec);
+    this.touch();
+    return { ok: true, data: clone };
+  }
+
   setClipProps(
     clipId: string,
     props: Partial<Pick<Clip, 'volumeDb' | 'speed' | 'audioMuted' | 'fadeInSec' | 'fadeOutSec' | 'text' | 'name' | 'scale' | 'posX' | 'posY' | 'cropL' | 'cropT' | 'cropR' | 'cropB' | 'filter' | 'fontFamily' | 'fontSize' | 'textColor' | 'textBg' | 'bold' | 'textAlign' | 'opacity'>> & { color?: Partial<ClipColor> },
@@ -868,6 +893,8 @@ export class ProjectStore {
           return this.splitClip(op.clipId, op.atSec);
         case 'timeline:deleteClip':
           return this.deleteClip(op.clipId, op.ripple);
+        case 'timeline:duplicateClip':
+          return this.duplicateClip(op.clipId, op.startSec, op.trackId);
         case 'clip:setProps':
           return this.setClipProps(op.clipId, op);
         case 'project:setAspect':

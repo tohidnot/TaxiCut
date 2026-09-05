@@ -6,7 +6,7 @@ import InspectorPanel from './components/InspectorPanel';
 import TimelinePanel from './components/TimelinePanel';
 import { useEditor, op } from './store';
 import type { Project } from '../../shared/types';
-import { IconFilePlus, IconFolderOpen, IconSave, IconExport } from './components/Icons';
+import { IconPlus, IconExport } from './components/Icons';
 
 export default function App() {
   const project = useEditor((s) => s.project);
@@ -70,6 +70,22 @@ export default function App() {
       } else if ((cmdOrCtrl && e.shiftKey && e.key.toLowerCase() === 'z') || (cmdOrCtrl && e.key.toLowerCase() === 'y')) {
         e.preventDefault();
         op({ op: 'history:redo' });
+      } else if (cmdOrCtrl && !e.shiftKey && e.key.toLowerCase() === 'c') {
+        const id = useEditor.getState().selectedClipId;
+        if (id) {
+          e.preventDefault();
+          useEditor.getState().setCopiedClip(id);
+        }
+      } else if (cmdOrCtrl && !e.shiftKey && e.key.toLowerCase() === 'v') {
+        const st = useEditor.getState();
+        const src = st.copiedClipId ?? st.selectedClipId;
+        if (src) {
+          e.preventDefault();
+          op({ op: 'timeline:duplicateClip', clipId: src, startSec: st.playheadSec }).then((r) => {
+            if (r.ok && r.data) st.select((r.data as { id: string }).id);
+            else if (!r.ok) alert(r.error);
+          });
+        }
       } else if (e.key === 'Backspace' || e.key === 'Delete') {
         const id = useEditor.getState().selectedClipId;
         if (id) {
@@ -154,21 +170,6 @@ export default function App() {
     if (!r.ok) alert(r.error);
   };
 
-  const onOpen = async () => {
-    if (project?.modified && !confirm('Discard unsaved changes and open a project?')) {
-      return;
-    }
-    const r = await op({ op: 'project:open' });
-    if (!r.ok && r.error && !r.error.includes('cancelled')) alert(r.error);
-  };
-
-  const onSave = async () => {
-    const r = await op({ op: 'project:save' });
-    if (!r.ok && r.error && !r.error.includes('cancelled')) setExportNote(`Save failed: ${r.error}`);
-    else if (r.ok) setExportNote('Project saved');
-    setTimeout(() => setExportNote(null), 3000);
-  };
-
   const onExport = async () => {
     const r = await op({ op: 'export:start' });
     if (!r.ok && r.error && !r.error.includes('cancelled')) setExportNote(`Export failed: ${r.error}`);
@@ -186,13 +187,7 @@ export default function App() {
         </div>
         <div className="actions">
           <button onClick={onNew} title="New Project" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-            <IconFilePlus size={12} /> New
-          </button>
-          <button onClick={onOpen} title="Open Project" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-            <IconFolderOpen size={12} /> Open…
-          </button>
-          <button onClick={onSave} title="Save Project (Cmd+S)" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-            <IconSave size={12} /> Save
+            <IconPlus size={12} /> New
           </button>
           <button className="accent" onClick={onExport} title="Export Timeline to MP4" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
             <IconExport size={12} /> Export

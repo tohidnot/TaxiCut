@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { IconFoldPanel, IconUnfoldPanel } from './Icons';
 import { op } from '../store';
 
 interface AgentGuide {
@@ -27,7 +28,7 @@ export default function TerminalPanel() {
   const hostRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const [sid, setSid] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
+  const [folded, setFolded] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
   const [guides, setGuides] = useState<AgentsStatus | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -85,16 +86,17 @@ export default function TerminalPanel() {
     };
   }, []);
 
-  // Refit after un-collapsing (xterm can't measure while display:none).
+  // Refit after unfolding (xterm can't measure while display:none).
+  // The host div stays mounted while folded so the session survives.
   useEffect(() => {
-    if (!collapsed) requestAnimationFrame(() => {
+    if (!folded) requestAnimationFrame(() => {
       try {
         fitRef.current?.fit();
       } catch {
         /* session may be gone */
       }
     });
-  }, [collapsed]);
+  }, [folded]);
 
   const refreshGuides = async (): Promise<void> => {
     const r = await op({ op: 'agents:status' });
@@ -117,7 +119,17 @@ export default function TerminalPanel() {
   };
 
   return (
-    <div className="terminal-panel">
+    <div className={`terminal-panel${folded ? ' folded' : ''}`}>
+      {folded ? (
+        <button
+          className="terminal-rail-btn"
+          title="Expand terminal panel"
+          onClick={() => setFolded(false)}
+        >
+          <IconUnfoldPanel size={14} />
+        </button>
+      ) : (
+      <>
       <div className="panel-header">
         Terminal
         <span className="spacer" />
@@ -130,10 +142,11 @@ export default function TerminalPanel() {
         </button>
         <button
           className="mini-btn"
-          title={collapsed ? 'Show terminal' : 'Hide terminal'}
-          onClick={() => setCollapsed((v) => !v)}
+          title="Fold terminal panel"
+          onClick={() => setFolded(true)}
+          style={{ display: 'inline-flex', alignItems: 'center' }}
         >
-          {collapsed ? '▸' : '▾'}
+          <IconFoldPanel size={12} />
         </button>
       </div>
       {setupOpen && (
@@ -188,13 +201,13 @@ export default function TerminalPanel() {
           {typedNote && <div className="mcp-setup-note">{typedNote}</div>}
         </div>
       )}
-      {!collapsed && (
-        <div className="terminal-hint">
-          Run your agent here, e.g. <code>claude</code>, or open <b>MCP Setup</b> above
-          for per-agent guides with a Run button.
-        </div>
+      <div className="terminal-hint">
+        Run your agent here, e.g. <code>claude</code>, or open <b>MCP Setup</b> above
+        for per-agent guides with a Run button.
+      </div>
+      </>
       )}
-      <div className="terminal-body" ref={hostRef} style={collapsed ? { display: 'none' } : undefined} />
+      <div className="terminal-body" ref={hostRef} style={folded ? { display: 'none' } : undefined} />
     </div>
   );
 }
