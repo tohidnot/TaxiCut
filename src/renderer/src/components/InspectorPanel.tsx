@@ -2,13 +2,55 @@ import { useEditor, op } from '../store';
 import { formatDuration } from '../time';
 import { canvasSize, CLIP_FILTERS, DEFAULT_CLIP_COLOR, FONT_FAMILIES, TEXT_TEMPLATES } from '../../../shared/types';
 import type { Clip } from '../../../shared/types';
-import { IconPlus } from './Icons';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { Label } from '@/components/ui/label';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Slider } from '@/components/ui/slider';
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
+import { AlignCenter, AlignLeft, AlignRight, Plus, SlidersHorizontal } from 'lucide-react';
+import type { ReactNode } from 'react';
 
 const ALIGN_SPOTS = [
   { id: 'tl', x: -1, y: -1 }, { id: 'tc', x: 0, y: -1 }, { id: 'tr', x: 1, y: -1 },
   { id: 'ml', x: -1, y: 0 }, { id: 'c', x: 0, y: 0 }, { id: 'mr', x: 1, y: 0 },
   { id: 'bl', x: -1, y: 1 }, { id: 'bc', x: 0, y: 1 }, { id: 'br', x: 1, y: 1 },
 ] as const;
+
+function Section({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <Card className="gap-2 py-3">
+      <CardHeader className="px-4">
+        <CardTitle>{title}</CardTitle>
+      </CardHeader>
+      <CardContent className="px-4">
+        <FieldGroup className="gap-3">{children}</FieldGroup>
+      </CardContent>
+    </Card>
+  );
+}
+
+function RowLabel({ children, value }: { children: ReactNode; value?: ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <FieldLabel>{children}</FieldLabel>
+      {value !== undefined && <Badge variant="secondary">{value}</Badge>}
+    </div>
+  );
+}
 
 export default function InspectorPanel() {
   const project = useEditor((s) => s.project);
@@ -49,162 +91,186 @@ export default function InspectorPanel() {
     <div className="inspector">
       <div className="panel-header">Inspector</div>
       {!clip && !selectedMedia ? (
-        <div className="insp-empty">
-          Select a clip on the timeline or a media item in the library to inspect its properties.
+        <div className="p-3">
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <SlidersHorizontal />
+              </EmptyMedia>
+              <EmptyTitle>Nothing selected</EmptyTitle>
+              <EmptyDescription>
+                Select a clip on the timeline or a media item in the library to inspect its properties.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
         </div>
       ) : clip ? (
-        <div className="body">
-          <div>
-            <h3>CLIP</h3>
-            <div className="insp-row">
-              <span>Name</span>
-              <input
-                type="text"
+        <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-3">
+          <Section title="Clip">
+            <Field>
+              <FieldLabel htmlFor="clip-name">Name</FieldLabel>
+              <Input
+                id="clip-name"
                 value={clip.name}
                 onChange={(e) => set({ name: e.target.value })}
-                style={{ flex: 1, minWidth: 0 }}
               />
-            </div>
-            <div className="insp-row">
-              <span style={{ color: 'var(--text-dim)' }}>
-                {formatDuration(clip.durationSec)} @ {clip.startSec.toFixed(2)}s (in: {clip.inSec.toFixed(2)}s)
+            </Field>
+            <div className="flex items-center justify-between gap-2">
+              <Badge variant="outline">{formatDuration(clip.durationSec)}</Badge>
+              <span className="text-muted-foreground text-xs">
+                @ {clip.startSec.toFixed(2)}s (in: {clip.inSec.toFixed(2)}s)
               </span>
             </div>
             {clip.kind !== 'text' && clip.text !== undefined && clip.text !== '' && (
-              <div style={{ marginTop: 6 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>Captions (auto):</span>
-                <input
-                  type="text"
+              <Field>
+                <FieldLabel htmlFor="clip-captions">Captions (auto)</FieldLabel>
+                <Input
+                  id="clip-captions"
                   value={clip.text}
                   onChange={(e) => set({ text: e.target.value })}
-                  style={{ width: '100%', marginTop: 4 }}
                 />
-              </div>
+              </Field>
             )}
-          </div>
-          <div>
-            <h3>LEVELS</h3>
-            <div className="insp-row">
-              <span>Volume</span>
-              <input
-                type="range"
+          </Section>
+          <Section title="Levels">
+            <Field>
+              <RowLabel value={`${clip.volumeDb.toFixed(1)} dB`}>Volume</RowLabel>
+              <Slider
+                aria-label="Volume"
                 min={-60}
                 max={12}
                 step={0.5}
-                value={clip.volumeDb}
-                onChange={(e) => set({ volumeDb: Number(e.target.value) })}
+                value={[clip.volumeDb]}
+                onValueChange={([v]) => set({ volumeDb: v })}
               />
-              <span>{clip.volumeDb.toFixed(1)} dB</span>
-            </div>
+            </Field>
             {(clip.kind === 'audio' || (clip.kind === 'video' && (clipMedia?.hasAudio ?? false))) && (
-              <div className="insp-row">
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                  <input
-                    type="checkbox"
-                    checked={!!clip.audioMuted}
-                    onChange={(e) => set({ audioMuted: e.target.checked })}
-                    style={{ accentColor: 'var(--accent)' }}
-                  />
-                  Mute audio (picture keeps playing)
-                </label>
-              </div>
+              <Field orientation="horizontal">
+                <Checkbox
+                  id="clip-mute"
+                  checked={!!clip.audioMuted}
+                  onCheckedChange={(v) => set({ audioMuted: v === true })}
+                />
+                <FieldLabel htmlFor="clip-mute">Mute audio (picture keeps playing)</FieldLabel>
+              </Field>
             )}
-            <div className="insp-row">
-              <span>Fade In</span>
-              <input
-                type="number"
-                min={0}
-                step={0.1}
-                value={clip.fadeInSec}
-                onChange={(e) => set({ fadeInSec: Number(e.target.value) })}
-              />
-              <span>s</span>
-            </div>
-            <div className="insp-row">
-              <span>Fade Out</span>
-              <input
-                type="number"
-                min={0}
-                step={0.1}
-                value={clip.fadeOutSec}
-                onChange={(e) => set({ fadeOutSec: Number(e.target.value) })}
-              />
-              <span>s</span>
-            </div>
-          </div>
-          <div>
-            <h3>PLAYBACK</h3>
-            <div className="insp-row">
-              <span>Speed</span>
-              <input
-                type="number"
-                min={0.1}
-                max={10}
-                step={0.1}
-                value={clip.speed}
-                onChange={(e) => set({ speed: Number(e.target.value) })}
-              />
-              <span>x</span>
-            </div>
-          </div>
+            <Field orientation="horizontal">
+              <FieldLabel htmlFor="clip-fadein">Fade In</FieldLabel>
+              <div className="flex items-center gap-1.5">
+                <Input
+                  id="clip-fadein"
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  value={clip.fadeInSec}
+                  onChange={(e) => set({ fadeInSec: Number(e.target.value) })}
+                  className="w-20"
+                />
+                <span className="text-muted-foreground text-xs">s</span>
+              </div>
+            </Field>
+            <Field orientation="horizontal">
+              <FieldLabel htmlFor="clip-fadeout">Fade Out</FieldLabel>
+              <div className="flex items-center gap-1.5">
+                <Input
+                  id="clip-fadeout"
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  value={clip.fadeOutSec}
+                  onChange={(e) => set({ fadeOutSec: Number(e.target.value) })}
+                  className="w-20"
+                />
+                <span className="text-muted-foreground text-xs">s</span>
+              </div>
+            </Field>
+          </Section>
+          <Section title="Playback">
+            <Field orientation="horizontal">
+              <FieldLabel htmlFor="clip-speed">Speed</FieldLabel>
+              <div className="flex items-center gap-1.5">
+                <Input
+                  id="clip-speed"
+                  type="number"
+                  min={0.1}
+                  max={10}
+                  step={0.1}
+                  value={clip.speed}
+                  onChange={(e) => set({ speed: Number(e.target.value) })}
+                  className="w-20"
+                />
+                <span className="text-muted-foreground text-xs">x</span>
+              </div>
+            </Field>
+          </Section>
           {(clip.kind === 'video' || clip.kind === 'image' || clip.kind === 'text') && (
-            <div>
-              <h3>TRANSFORM</h3>
-              <div className="insp-row">
-                <span>Scale</span>
-                <input
-                  type="range"
+            <Section title="Transform">
+              <Field>
+                <RowLabel value={`${(clip.scale ?? 1).toFixed(2)}x`}>Scale</RowLabel>
+                <Slider
+                  aria-label="Scale"
                   min={0.1}
                   max={4}
                   step={0.05}
-                  value={clip.scale ?? 1}
-                  onChange={(e) => set({ scale: Number(e.target.value) })}
+                  value={[clip.scale ?? 1]}
+                  onValueChange={([v]) => set({ scale: v })}
                 />
-                <span>{(clip.scale ?? 1).toFixed(2)}x</span>
-              </div>
-              <div className="insp-row">
-                <span>X</span>
-                <input
-                  type="number"
-                  step={0.05}
-                  value={clip.posX ?? 0}
-                  onChange={(e) => set({ posX: Number(e.target.value) })}
-                />
-                <span>Y</span>
-                <input
-                  type="number"
-                  step={0.05}
-                  value={clip.posY ?? 0}
-                  onChange={(e) => set({ posY: Number(e.target.value) })}
-                />
+              </Field>
+              <div className="flex items-end gap-2">
+                <Field className="flex-1">
+                  <FieldLabel htmlFor="clip-posx">X</FieldLabel>
+                  <Input
+                    id="clip-posx"
+                    type="number"
+                    step={0.05}
+                    value={clip.posX ?? 0}
+                    onChange={(e) => set({ posX: Number(e.target.value) })}
+                  />
+                </Field>
+                <Field className="flex-1">
+                  <FieldLabel htmlFor="clip-posy">Y</FieldLabel>
+                  <Input
+                    id="clip-posy"
+                    type="number"
+                    step={0.05}
+                    value={clip.posY ?? 0}
+                    onChange={(e) => set({ posY: Number(e.target.value) })}
+                  />
+                </Field>
               </div>
               {(clip.kind === 'video' || clip.kind === 'image') && (
                 <>
-                  <div className="insp-row">
-                    <button
+                  <div className="flex gap-1.5">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1"
                       title="Fit whole video in canvas"
-                      style={{ flex: 1 }}
                       onClick={() => set({ scale: 1, posX: 0, posY: 0 })}
                     >
                       Fit
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1"
                       title="Fill the whole canvas (crops overflow)"
-                      style={{ flex: 1 }}
                       onClick={() => set({ scale: Math.round(fillScale * 100) / 100, posX: 0, posY: 0 })}
                     >
                       Fill
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1"
                       title="Center video on canvas"
-                      style={{ flex: 1 }}
                       onClick={() => set({ posX: 0, posY: 0 })}
                     >
                       Center
-                    </button>
+                    </Button>
                   </div>
-                  <div className="insp-row" style={{ alignItems: 'center' }}>
-                    <span>Align</span>
+                  <Field orientation="horizontal">
+                    <FieldLabel>Align</FieldLabel>
                     <div className="align-grid">
                       {ALIGN_SPOTS.map((a) => (
                         <button
@@ -233,152 +299,172 @@ export default function InspectorPanel() {
                         </button>
                       ))}
                     </div>
-                  </div>
+                  </Field>
                 </>
               )}
               {clip.kind === 'text' && (
-                <div className="insp-row">
-                  <button
-                    title="Center text on canvas"
-                    style={{ flex: 1 }}
-                    onClick={() => set({ posX: 0, posY: 0 })}
-                  >
-                    Center
-                  </button>
-                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  title="Center text on canvas"
+                  onClick={() => set({ posX: 0, posY: 0 })}
+                >
+                  Center
+                </Button>
               )}
-              <div className="insp-row">
-                <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>
-                  Tip: drag the video in the viewer to move it, drag a corner to resize.
-                </span>
-              </div>
-              <button
-                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+              <p className="text-muted-foreground text-xs">
+                Tip: drag the video in the viewer to move it, drag a corner to resize.
+              </p>
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={() => set({ scale: 1, posX: 0, posY: 0 })}
               >
                 Reset transform
-              </button>
-            </div>
+              </Button>
+            </Section>
           )}
-          <div>
-            <h3>LAYER</h3>
+          <Section title="Layer">
             {(clip.kind === 'video' || clip.kind === 'image' || clip.kind === 'text') && (
-              <div className="insp-row">
-                <span>Opacity</span>
-                <input
-                  type="range"
+              <Field>
+                <RowLabel
+                  value={`${Math.round(((clip as { opacity?: number }).opacity ?? 1) * 100)}%`}
+                >
+                  Opacity
+                </RowLabel>
+                <Slider
+                  aria-label="Layer opacity"
+                  title="Layer opacity — lower the top layer to see the background through it"
                   min={0}
                   max={100}
                   step={1}
-                  value={Math.round(((clip as { opacity?: number }).opacity ?? 1) * 100)}
-                  onChange={(e) => set({ opacity: Number(e.target.value) / 100 })}
-                  title="Layer opacity — lower the top layer to see the background through it"
+                  value={[Math.round(((clip as { opacity?: number }).opacity ?? 1) * 100)]}
+                  onValueChange={([v]) => set({ opacity: v / 100 })}
                 />
-                <span>{Math.round(((clip as { opacity?: number }).opacity ?? 1) * 100)}%</span>
-              </div>
+              </Field>
             )}
-            <div className="insp-row" style={{ flexWrap: 'wrap', gap: 6 }}>
-              <span>Order</span>
-              <div className="layer-order-btns">
-                <button
+            <Field>
+              <FieldLabel>Order</FieldLabel>
+              <div className="flex flex-wrap gap-1.5">
+                <Button
+                  variant="outline"
+                  size="xs"
                   title="Send to back (Cmd+Shift+[)"
                   onClick={() => op({ op: 'timeline:reorderClip', clipId: clip.id, position: 'back' })}
                 >
                   Back
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="outline"
+                  size="xs"
                   title="Move down one layer (Cmd+[)"
                   onClick={() => op({ op: 'timeline:reorderClip', clipId: clip.id, direction: -1 })}
                 >
                   ↓
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="outline"
+                  size="xs"
                   title="Move up one layer (Cmd+])"
                   onClick={() => op({ op: 'timeline:reorderClip', clipId: clip.id, direction: 1 })}
                 >
                   ↑
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="outline"
+                  size="xs"
                   title="Bring to front (Cmd+Shift+])"
                   onClick={() => op({ op: 'timeline:reorderClip', clipId: clip.id, position: 'front' })}
                 >
                   Front
-                </button>
+                </Button>
               </div>
-            </div>
-            <div className="insp-row">
-              <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>
-                Drag a clip onto another lane to restack it, or use Back / ↓ / ↑ / Front.
-              </span>
-            </div>
-          </div>
+            </Field>
+            <p className="text-muted-foreground text-xs">
+              Drag a clip onto another lane to restack it, or use Back / ↓ / ↑ / Front.
+            </p>
+          </Section>
           {(clip.kind === 'video' || clip.kind === 'image') && (
-            <div>
-              <h3>CROP (%)</h3>
-              <div className="insp-row">
-                <span>Left</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={90}
-                  step={1}
-                  value={Math.round((clip.cropL ?? 0) * 100)}
-                  onChange={(e) => set({ cropL: Number(e.target.value) / 100 })}
-                />
-                <span>Right</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={90}
-                  step={1}
-                  value={Math.round((clip.cropR ?? 0) * 100)}
-                  onChange={(e) => set({ cropR: Number(e.target.value) / 100 })}
-                />
+            <Section title="Crop (%)">
+              <div className="flex items-end gap-2">
+                <Field className="flex-1">
+                  <FieldLabel htmlFor="clip-cropl">Left</FieldLabel>
+                  <Input
+                    id="clip-cropl"
+                    type="number"
+                    min={0}
+                    max={90}
+                    step={1}
+                    value={Math.round((clip.cropL ?? 0) * 100)}
+                    onChange={(e) => set({ cropL: Number(e.target.value) / 100 })}
+                  />
+                </Field>
+                <Field className="flex-1">
+                  <FieldLabel htmlFor="clip-cropr">Right</FieldLabel>
+                  <Input
+                    id="clip-cropr"
+                    type="number"
+                    min={0}
+                    max={90}
+                    step={1}
+                    value={Math.round((clip.cropR ?? 0) * 100)}
+                    onChange={(e) => set({ cropR: Number(e.target.value) / 100 })}
+                  />
+                </Field>
               </div>
-              <div className="insp-row">
-                <span>Top</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={90}
-                  step={1}
-                  value={Math.round((clip.cropT ?? 0) * 100)}
-                  onChange={(e) => set({ cropT: Number(e.target.value) / 100 })}
-                />
-                <span>Bottom</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={90}
-                  step={1}
-                  value={Math.round((clip.cropB ?? 0) * 100)}
-                  onChange={(e) => set({ cropB: Number(e.target.value) / 100 })}
-                />
+              <div className="flex items-end gap-2">
+                <Field className="flex-1">
+                  <FieldLabel htmlFor="clip-cropt">Top</FieldLabel>
+                  <Input
+                    id="clip-cropt"
+                    type="number"
+                    min={0}
+                    max={90}
+                    step={1}
+                    value={Math.round((clip.cropT ?? 0) * 100)}
+                    onChange={(e) => set({ cropT: Number(e.target.value) / 100 })}
+                  />
+                </Field>
+                <Field className="flex-1">
+                  <FieldLabel htmlFor="clip-cropb">Bottom</FieldLabel>
+                  <Input
+                    id="clip-cropb"
+                    type="number"
+                    min={0}
+                    max={90}
+                    step={1}
+                    value={Math.round((clip.cropB ?? 0) * 100)}
+                    onChange={(e) => set({ cropB: Number(e.target.value) / 100 })}
+                  />
+                </Field>
               </div>
-              <div className="insp-row">
-                <button
+              <div className="flex gap-1.5">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="flex-1"
                   title="Edit crop by dragging in the viewer"
-                  style={{ flex: 1 }}
                   onClick={() => {
                     setPreviewMode('timeline');
                     setCropMode(!cropMode);
                   }}
                 >
                   {cropMode ? 'Exit viewer crop' : 'Crop in viewer'}
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="flex-1"
                   title="Remove crop"
-                  style={{ flex: 1 }}
                   onClick={() => set({ cropL: 0, cropT: 0, cropR: 0, cropB: 0 })}
                 >
                   Reset crop
-                </button>
+                </Button>
               </div>
-            </div>
+            </Section>
           )}
           {clip.kind === 'text' && (
-            <div>
-              <h3>TEXT</h3>
+            <Section title="Text">
               <div className="tpl-grid">
                 {TEXT_TEMPLATES.map((t) => (
                   <button
@@ -410,114 +496,127 @@ export default function InspectorPanel() {
                   </button>
                 ))}
               </div>
-              <div style={{ marginTop: 8 }}>
-                <textarea
+              <Field>
+                <FieldLabel htmlFor="clip-text">Content</FieldLabel>
+                <Textarea
+                  id="clip-text"
                   rows={3}
                   value={clip.text ?? ''}
                   onChange={(e) => set({ text: e.target.value })}
                   placeholder="Text overlay…"
-                  style={{ width: '100%', resize: 'vertical' }}
                 />
-              </div>
-              <div className="insp-row" style={{ marginTop: 8 }}>
-                <span>Font</span>
-                <select
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="clip-font">Font</FieldLabel>
+                <Select
                   value={clip.fontFamily || 'Arial'}
-                  onChange={(e) => set({ fontFamily: e.target.value })}
-                  style={{ flex: 1, minWidth: 0 }}
+                  onValueChange={(v) => set({ fontFamily: v })}
                 >
-                  {FONT_FAMILIES.map((f) => (
-                    <option key={f} value={f}>{f}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="insp-row">
-                <span>Size</span>
-                <input
-                  type="range"
+                  <SelectTrigger id="clip-font">
+                    <SelectValue placeholder="Font" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {FONT_FAMILIES.map((f) => (
+                        <SelectItem key={f} value={f}>{f}</SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field>
+                <RowLabel value={`${clip.fontSize ?? 72}px`}>Size</RowLabel>
+                <Slider
+                  aria-label="Font size"
                   min={16}
                   max={240}
                   step={2}
-                  value={clip.fontSize ?? 72}
-                  onChange={(e) => set({ fontSize: Number(e.target.value) })}
+                  value={[clip.fontSize ?? 72]}
+                  onValueChange={([v]) => set({ fontSize: v })}
                 />
-                <span>{clip.fontSize ?? 72}px</span>
-              </div>
-              <div className="insp-row">
-                <span>Color</span>
-                <input
-                  type="color"
-                  value={clip.textColor || '#ffffff'}
-                  onChange={(e) => set({ textColor: e.target.value })}
-                />
-                <span>BG</span>
-                <input
-                  type="color"
-                  value={clip.textBg || '#000000'}
-                  onChange={(e) => set({ textBg: e.target.value })}
-                />
-                <button
-                  title="Transparent background"
-                  disabled={!clip.textBg}
-                  onClick={() => set({ textBg: '' })}
-                >
-                  Clear
-                </button>
-              </div>
-              <div className="insp-row">
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+              </Field>
+              <Field orientation="horizontal">
+                <FieldLabel htmlFor="clip-color">Color</FieldLabel>
+                <div className="flex items-center gap-2">
                   <input
-                    type="checkbox"
-                    checked={!!clip.bold}
-                    onChange={(e) => set({ bold: e.target.checked })}
-                    style={{ accentColor: 'var(--accent)' }}
+                    id="clip-color"
+                    type="color"
+                    value={clip.textColor || '#ffffff'}
+                    onChange={(e) => set({ textColor: e.target.value })}
+                    className="h-8 w-10 cursor-pointer rounded border border-border bg-transparent p-0.5"
                   />
-                  Bold
-                </label>
-                <span style={{ display: 'inline-flex', gap: 4 }}>
-                  {(['left', 'center', 'right'] as const).map((a) => (
-                    <button
-                      key={a}
-                      title={`Align ${a}`}
-                      onClick={() => set({ textAlign: a })}
-                      style={{
-                        fontWeight: (clip.textAlign || 'center') === a ? 700 : 400,
-                        borderColor: (clip.textAlign || 'center') === a ? 'var(--accent)' : undefined,
-                        textTransform: 'capitalize',
-                      }}
-                    >
-                      {a[0].toUpperCase()}
-                    </button>
-                  ))}
-                </span>
+                  <FieldLabel htmlFor="clip-textbg">BG</FieldLabel>
+                  <input
+                    id="clip-textbg"
+                    type="color"
+                    value={clip.textBg || '#000000'}
+                    onChange={(e) => set({ textBg: e.target.value })}
+                    className="h-8 w-10 cursor-pointer rounded border border-border bg-transparent p-0.5"
+                  />
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    title="Transparent background"
+                    disabled={!clip.textBg}
+                    onClick={() => set({ textBg: '' })}
+                  >
+                    Clear
+                  </Button>
+                </div>
+              </Field>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="clip-bold"
+                    checked={!!clip.bold}
+                    onCheckedChange={(v) => set({ bold: v === true })}
+                  />
+                  <Label htmlFor="clip-bold">Bold</Label>
+                </div>
+                <ToggleGroup
+                  type="single"
+                  size="sm"
+                  value={clip.textAlign || 'center'}
+                  onValueChange={(v) => {
+                    if (v) set({ textAlign: v });
+                  }}
+                  aria-label="Text alignment"
+                >
+                  <ToggleGroupItem value="left" aria-label="Align left">
+                    <AlignLeft />
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="center" aria-label="Align center">
+                    <AlignCenter />
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="right" aria-label="Align right">
+                    <AlignRight />
+                  </ToggleGroupItem>
+                </ToggleGroup>
               </div>
-              <div className="insp-row">
-                <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>
-                  Tip: double-click the text in the viewer to edit it there.
-                </span>
-              </div>
-            </div>
+              <p className="text-muted-foreground text-xs">
+                Tip: double-click the text in the viewer to edit it there.
+              </p>
+            </Section>
           )}
           {(clip.kind === 'video' || clip.kind === 'image') && (
-            <div>
-              <h3>FILTER</h3>
-              <div className="filter-grid">
+            <Section title="Filter">
+              <div className="flex flex-wrap gap-1.5">
                 {CLIP_FILTERS.map((f) => (
-                  <button
+                  <Button
                     key={f.id || 'none'}
-                    className={`filter-btn${(clip.filter || '') === f.id ? ' active' : ''}`}
+                    size="xs"
+                    variant={(clip.filter || '') === f.id ? 'default' : 'outline'}
                     title={f.id ? `${f.name} look` : 'No filter'}
                     onClick={() => set({ filter: f.id })}
                   >
                     {f.name}
-                  </button>
+                  </Button>
                 ))}
               </div>
-            </div>
+            </Section>
           )}
           {(clip.kind === 'video' || clip.kind === 'image') && (
-            <div>
-              <h3>COLOR GRADE</h3>
+            <Section title="Color Grade">
               {(
                 [
                   { key: 'exposure', label: 'Exposure', min: -1, max: 1, step: 0.05 },
@@ -528,80 +627,66 @@ export default function InspectorPanel() {
               ).map((s) => {
                 const val = clip.color?.[s.key] ?? DEFAULT_CLIP_COLOR[s.key];
                 return (
-                  <div className="insp-row" key={s.key}>
-                    <span>{s.label}</span>
-                    <input
-                      type="range"
+                  <Field key={s.key}>
+                    <RowLabel value={val.toFixed(2)}>{s.label}</RowLabel>
+                    <Slider
+                      aria-label={s.label}
                       min={s.min}
                       max={s.max}
                       step={s.step}
-                      value={val}
-                      onChange={(e) =>
-                        set({ color: { ...clip.color, [s.key]: Number(e.target.value) } })
+                      value={[val]}
+                      onValueChange={([v]) =>
+                        set({ color: { ...clip.color, [s.key]: v } })
                       }
-                      title={`${s.label}: ${val.toFixed(2)}`}
                     />
-                    <span style={{ color: 'var(--text-dim)', minWidth: 36, textAlign: 'right' }}>
-                      {val.toFixed(2)}
-                    </span>
-                  </div>
+                  </Field>
                 );
               })}
-              <div className="insp-row">
-                <span />
-                <button className="icon" onClick={() => set({ color: { ...DEFAULT_CLIP_COLOR } })}>
-                  Reset grade
-                </button>
-              </div>
-            </div>
+              <Button variant="ghost" size="sm" onClick={() => set({ color: { ...DEFAULT_CLIP_COLOR } })}>
+                Reset grade
+              </Button>
+            </Section>
           )}
         </div>
       ) : selectedMedia ? (
-        <div className="body">
-          <div>
-            <h3>MEDIA ASSET</h3>
-            <div className="insp-row">
-              <span style={{ fontWeight: 600, wordBreak: 'break-all' }}>{selectedMedia.name}</span>
+        <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-3">
+          <Section title="Media Asset">
+            <div className="text-sm font-semibold break-all">{selectedMedia.name}</div>
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="text-muted-foreground">Type</span>
+              <Badge variant="outline">{selectedMedia.kind.toUpperCase()}</Badge>
             </div>
-            <div className="insp-row">
-              <span>Type</span>
-              <span style={{ color: 'var(--text-dim)' }}>{selectedMedia.kind.toUpperCase()}</span>
-            </div>
-            <div className="insp-row">
-              <span>Duration</span>
-              <span style={{ color: 'var(--text-dim)' }}>{formatDuration(selectedMedia.durationSec)}</span>
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="text-muted-foreground">Duration</span>
+              <span>{formatDuration(selectedMedia.durationSec)}</span>
             </div>
             {selectedMedia.width > 0 && (
-              <div className="insp-row">
-                <span>Resolution</span>
-                <span style={{ color: 'var(--text-dim)' }}>
-                  {selectedMedia.width} × {selectedMedia.height}
-                </span>
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="text-muted-foreground">Resolution</span>
+                <span>{selectedMedia.width} × {selectedMedia.height}</span>
               </div>
             )}
             {selectedMedia.fps > 0 && (
-              <div className="insp-row">
-                <span>Framerate</span>
-                <span style={{ color: 'var(--text-dim)' }}>{selectedMedia.fps.toFixed(2)} fps</span>
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="text-muted-foreground">Framerate</span>
+                <span>{selectedMedia.fps.toFixed(2)} fps</span>
               </div>
             )}
-            <div className="insp-row">
-              <span>Audio</span>
-              <span style={{ color: 'var(--text-dim)' }}>{selectedMedia.hasAudio ? 'Yes' : 'No'}</span>
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="text-muted-foreground">Audio</span>
+              <span>{selectedMedia.hasAudio ? 'Yes' : 'No'}</span>
             </div>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <button
-              className="accent"
-              style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+            <Button
+              variant="default"
+              size="sm"
               onClick={() => {
                 setPreviewMode('timeline');
                 op({ op: 'timeline:addClip', mediaId: selectedMedia.id, startSec: playheadSec });
               }}
             >
-              <IconPlus size={12} /> Add to Timeline
-            </button>
-          </div>
+              <Plus data-icon="inline-start" /> Add to Timeline
+            </Button>
+          </Section>
         </div>
       ) : null}
     </div>

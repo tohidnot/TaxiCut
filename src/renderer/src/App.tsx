@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import TerminalPanel from './components/TerminalPanel';
 import MediaPanel from './components/MediaPanel';
 import PreviewPanel from './components/PreviewPanel';
@@ -6,13 +6,26 @@ import InspectorPanel from './components/InspectorPanel';
 import TimelinePanel from './components/TimelinePanel';
 import { useEditor, op } from './store';
 import type { Project } from '../../shared/types';
-import { IconPlus, IconExport } from './components/Icons';
+import { Button } from '@/components/ui/button';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { Toaster } from '@/components/ui/sonner';
+import { TooltipProvider } from '@/components/ui/tooltip';
+import { toast } from 'sonner';
+import { Download, Plus } from 'lucide-react';
 
 export default function App() {
   const project = useEditor((s) => s.project);
   const setProject = useEditor((s) => s.setProject);
-  const exportNote = useEditor((s) => s.exportNote);
-  const setExportNote = useEditor((s) => s.setExportNote);
+  const [confirmNewOpen, setConfirmNewOpen] = useState(false);
   const playing = useEditor((s) => s.playing);
   const setPlaying = useEditor((s) => s.setPlaying);
   const playheadSec = useEditor((s) => s.playheadSec);
@@ -26,17 +39,16 @@ export default function App() {
     });
     window.taxicut.onExportProgress((job) => {
       const j = job as { status: string; progress: number; outPath: string; error?: string };
-      if (j.status === 'running') setExportNote(`Exporting… ${Math.round(j.progress * 100)}%`);
-      else if (j.status === 'done') setExportNote(`Exported to ${j.outPath}`);
-      else setExportNote(`Export failed: ${j.error}`);
-      if (j.status !== 'running') setTimeout(() => setExportNote(null), 5000);
+      if (j.status === 'running') toast.loading(`Exporting… ${Math.round(j.progress * 100)}%`, { id: 'export' });
+      else if (j.status === 'done') toast.success(`Exported to ${j.outPath}`, { id: 'export' });
+      else toast.error(`Export failed: ${j.error}`, { id: 'export' });
     });
     op({ op: 'project:get' }).then((r) => {
       const d = r.data as { project: Project; filePath: string | null };
       if (d) setProject(d.project, d.filePath);
     });
     return off;
-  }, [setProject, setExportNote]);
+  }, [setProject]);
 
   // Global Keyboard Shortcuts
   useEffect(() => {
@@ -162,50 +174,77 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [setPlaying, setPlayhead, select]);
 
-  const onNew = async () => {
-    if (project?.modified && !confirm('Discard unsaved changes and start a new project?')) {
+  const doNew = async () => {
+    const r = await op({ op: 'project:new' });
+    if (!r.ok) toast.error(r.error);
+  };
+
+  const onNew = () => {
+    if (project?.modified) {
+      setConfirmNewOpen(true);
       return;
     }
-    const r = await op({ op: 'project:new' });
-    if (!r.ok) alert(r.error);
+    void doNew();
   };
 
   const onExport = async () => {
     const r = await op({ op: 'export:start' });
-    if (!r.ok && r.error && !r.error.includes('cancelled')) setExportNote(`Export failed: ${r.error}`);
+    if (!r.ok && r.error && !r.error.includes('cancelled')) toast.error(`Export failed: ${r.error}`);
   };
 
   return (
-    <div className="app">
-      <div className="titlebar">
-        <div className="wordmark">
-          Taxi<span>Cut</span>
-        </div>
-        <div className="project-name">
-          {project?.name ?? 'Untitled Project'}
-          {project?.modified ? ' •' : ''}
-        </div>
-        <div className="actions">
-          <button onClick={onNew} title="New Project" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-            <IconPlus size={12} /> New
-          </button>
-          <button className="accent" onClick={onExport} title="Export Timeline to MP4" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-            <IconExport size={12} /> Export
-          </button>
-        </div>
-      </div>
-      <div className="workspace">
-        <TerminalPanel />
-        <div className="main-col">
-          <div className="main-top">
-            <MediaPanel />
-            <PreviewPanel />
-            <InspectorPanel />
+    <TooltipProvider>
+      <div className="app dark">
+        <div className="titlebar">
+          <div className="wordmark">
+            Taxi<span>Cut</span>
           </div>
-          <TimelinePanel />
+          <div className="project-name">
+            {project?.name ?? 'Untitled Project'}
+            {project?.modified ? ' •' : ''}
+          </div>
+          <div className="actions">
+            <Button variant="outline" size="sm" onClick={onNew} title="New Project">
+              <Plus data-icon="inline-start" /> New
+            </Button>
+            <Button variant="default" size="sm" onClick={onExport} title="Export Timeline to MP4">
+              <Download data-icon="inline-start" /> Export
+            </Button>
+          </div>
         </div>
+        <div className="workspace">
+          <TerminalPanel />
+          <div className="main-col">
+            <div className="main-top">
+              <MediaPanel />
+              <PreviewPanel />
+              <InspectorPanel />
+            </div>
+            <TimelinePanel />
+          </div>
+        </div>
+        <AlertDialog open={confirmNewOpen} onOpenChange={setConfirmNewOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Start a new project?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Unsaved changes to “{project?.name ?? 'Untitled Project'}” will be discarded.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  void doNew();
+                }}
+              >
+                Discard &amp; New
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+        <Toaster position="bottom-center" />
       </div>
-      {exportNote && <div className="flash-note">{exportNote}</div>}
-    </div>
+    </TooltipProvider>
   );
 }
